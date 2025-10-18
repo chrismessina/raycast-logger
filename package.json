@@ -1,0 +1,42 @@
+{
+  "name": "@chrismessina/raycast-logger",
+  "version": "1.0.0",
+  "description": "A secure, preference-driven logger for Raycast extensions with automatic redaction of sensitive data",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "raycast",
+    "logger",
+    "logging",
+    "security",
+    "redaction",
+    "privacy"
+  ],
+  "author": "Chris Messina",
+  "license": "MIT",
+  "peerDependencies": {
+    "@raycast/api": "^1.0.0"
+  },
+  "devDependencies": {
+    "@raycast/api": "^1.83.2",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chrismessina/raycast-logger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chrismessina/raycast-logger/issues"
+  },
+  "homepage": "https://github.com/chrismessina/raycast-logger#readme"
+}
