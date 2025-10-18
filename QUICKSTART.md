@@ -2,54 +2,18 @@
 
 Get up and running with `@chrismessina/raycast-logger` in 3 steps.
 
-## Step 1: Build the Package
+## Step 1: Install the Package
+
+In your Raycast extension:
 
 ```bash
-cd /Users/messina/Developer/GitHub/chrismessina/raycast-logger
-npm install
-npm run build
+npm install @chrismessina/raycast-logger
 ```
 
-## Step 2: Link to Your Extension (for local testing)
+## Step 2: Add Verbose Logging Preference
 
-```bash
-# In the logger directory
-npm link
+In your extension's `package.json`, add the preference:
 
-# In your extension directory
-cd /Users/messina/Developer/GitHub/chrismessina/raycast-ios-apps
-npm link @chrismessina/raycast-logger
-```
-
-## Step 3: Update Your Extension Code
-
-### Update imports
-
-Find and replace in your extension:
-```typescript
-// OLD
-import { logger } from "./utils/logger";
-
-// NEW
-import { logger } from "@chrismessina/raycast-logger";
-```
-
-### Update your types
-
-In `src/types.ts`:
-```typescript
-import { LoggerPreferences } from "@chrismessina/raycast-logger";
-
-export interface ExtensionPreferences extends LoggerPreferences {
-  appleId: string;
-  password: string;
-  // ... your other preferences
-}
-```
-
-### Ensure preference exists
-
-In your extension's `package.json`, verify you have:
 ```json
 {
   "preferences": [
@@ -58,25 +22,46 @@ In your extension's `package.json`, verify you have:
       "type": "checkbox",
       "required": false,
       "title": "Verbose Logging",
-      "description": "Show detailed logs in the console",
+      "label": "Enable detailed logging",
+      "description": "Show detailed logs in the console for debugging",
       "default": false
     }
   ]
 }
 ```
 
-## That's it!
+## Step 3: Use the Logger
 
-Your extension now uses the shared logger package. Test it:
+Import and use the logger in your extension:
 
-```bash
-npm run dev
+```typescript
+import { logger } from "@chrismessina/raycast-logger";
+
+// Logs only if verbose logging is enabled
+logger.log("Processing request", { userId: 123 });
+
+// Always logged
+logger.error("Failed to authenticate", error);
+logger.warn("Rate limit approaching", { remaining: 10 });
 ```
+
+If you're migrating from a custom logger, extend `LoggerPreferences` in your preferences interface:
+
+```typescript
+import { LoggerPreferences } from "@chrismessina/raycast-logger";
+
+export interface ExtensionPreferences extends LoggerPreferences {
+  apiKey: string;
+  // ... your other preferences
+}
+```
+
+## That's it!
 
 Enable "Verbose Logging" in your extension preferences and check the console for logs.
 
 ## Next Steps
 
-- Read [SETUP.md](./SETUP.md) for publishing to npm
-- Read [README.md](./README.md) for full API documentation
+- Read [README.md](./README.md) for full API documentation and examples
 - Check [CHANGELOG.md](./CHANGELOG.md) for version history
+- View [WARP.md](./WARP.md) for development guidance

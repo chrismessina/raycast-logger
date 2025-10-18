@@ -178,6 +178,5 @@ Automatically redacted patterns in strings (regex-based):
 ## Documentation References
 
 - **README.md** – Full API reference, usage examples, and type definitions.
-- **SETUP.md** – Publishing workflow and release procedures.
 - **QUICKSTART.md** – 3-step setup for consuming extensions.
 - **CHANGELOG.md** – Version history and feature tracking.
