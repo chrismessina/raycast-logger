@@ -39,12 +39,10 @@ export function redactString(input: string): string {
 }
 
 /**
- * Redact values based on their key names
- * @param key The property key name
- * @param value The value to potentially redact
- * @returns Redacted value if key indicates sensitive data
+ * Redact a value based on its key name - safe to use as JSON.stringify replacer
+ * Does NOT recurse into objects; lets JSON.stringify handle traversal
  */
-export function redactValueByKey(key: string, value: unknown): unknown {
+export function redactByKey(key: string, value: unknown): unknown {
   const k = key.toLowerCase();
   if (value == null) return value;
 
@@ -71,16 +69,31 @@ export function redactValueByKey(key: string, value: unknown): unknown {
     return value;
   }
 
+  // Return objects/arrays as-is; JSON.stringify will recurse into them
+  return value;
+}
+
+/**
+ * Redact values based on their key names
+ * @param key The property key name
+ * @param value The value to potentially redact
+ * @returns Redacted value if key indicates sensitive data
+ */
+export function redactValueByKey(key: string, value: unknown): unknown {
+  if (value == null) return value;
+
+  // For objects, use JSON.stringify with the safe replacer
   if (typeof value === "object") {
     try {
-      const json = JSON.stringify(value, (prop, val) => redactValueByKey(prop, val));
+      const json = JSON.stringify(value, (prop, val) => redactByKey(prop, val));
       return JSON.parse(json);
     } catch {
       return value;
     }
   }
 
-  return value;
+  // For primitives, use the key-based redaction directly
+  return redactByKey(key, value);
 }
 
 /**
@@ -93,7 +106,7 @@ export function sanitizeArgs(args: unknown[]): unknown[] {
     if (typeof arg === "string") return redactString(arg);
     if (typeof arg === "object" && arg !== null) {
       try {
-        const json = JSON.stringify(arg, (key, value) => redactValueByKey(key, value));
+        const json = JSON.stringify(arg, (key, value) => redactByKey(key, value));
         return JSON.parse(json);
       } catch {
         return arg;

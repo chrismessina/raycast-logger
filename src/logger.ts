@@ -1,5 +1,5 @@
 import { getPreferenceValues } from "@raycast/api";
-import { redactString, redactValueByKey, sanitizeArgs } from "./redaction";
+import { redactByKey, redactString, sanitizeArgs } from "./redaction";
 
 /**
  * ANSI color codes for terminal output (zero dependencies)
@@ -391,7 +391,7 @@ export class Logger {
     try {
       if (this.config.enableRedaction) {
         const sanitized = JSON.parse(
-          JSON.stringify(value, (key, val) => redactValueByKey(key, val)),
+          JSON.stringify(value, (key, val) => redactByKey(key, val)),
         );
         formatted = JSON.stringify(sanitized, null, 2);
       } else {
