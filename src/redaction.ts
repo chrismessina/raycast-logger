@@ -9,9 +9,11 @@
  * @example "user@example.com" → "u***@example.com"
  */
 function maskEmail(text: string): string {
+  // Use a proper email regex that won't greedily match URL schemes/paths
+  // The (?<![A-Za-z0-9._%+-]) negative lookbehind ensures we start at the beginning of the email
   return text.replace(
-    /([A-Za-z0-9._%+-])[^@\s]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g,
-    (_m, p1: string, p2: string) => `${p1}***${p2}`,
+    /(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g,
+    (_m, p1: string, _p2: string, p3: string) => `${p1}***${p3}`,
   );
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@chrismessina/raycast-logger",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "A secure, preference-driven logger for Raycast extensions with automatic redaction of sensitive data",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

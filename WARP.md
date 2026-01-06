@@ -7,26 +7,31 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 Using **npm** (detected from `package-lock.json`).
 
 - **Install dependencies:**
+
   ```bash
   npm install
   ```
 
 - **Build the package:**
+
   ```bash
   npm run build
   ```
 
 - **Watch for changes (development):**
+
   ```bash
   npm run watch
   ```
 
 - **Create distribution tarball:**
+
   ```bash
   npm pack
   ```
 
 - **Publish to npm:**
+
   ```bash
   # For first-time publication
   npm publish --access public
@@ -37,6 +42,7 @@ Using **npm** (detected from `package-lock.json`).
   ```
 
 - **Clean build output:**
+
   ```bash
   npm run clean
   ```
@@ -108,6 +114,7 @@ Using **npm** (detected from `package-lock.json`).
 - **Peer Dependency:** Requires `@raycast/api ^1.0.0` to run (not at build time). Consumers must provide it.
 - **Module Format:** CommonJS output (`module: "commonjs"`, `target: "ES2020"`) with `.d.ts` declaration files. Main entry point is `dist/index.js`; types at `dist/index.d.ts`.
 - **Imports in Extensions:**
+
   ```typescript
   import { logger, Logger, type LoggerPreferences } from "@chrismessina/raycast-logger";
 
@@ -123,12 +130,14 @@ Using **npm** (detected from `package-lock.json`).
 To test unreleased changes in a consuming Raycast extension:
 
 1. **In the logger package directory:**
+
    ```bash
    npm run build
    npm link
    ```
 
 2. **In the consuming extension directory:**
+
    ```bash
    npm link @chrismessina/raycast-logger
    ```
@@ -136,6 +145,7 @@ To test unreleased changes in a consuming Raycast extension:
 3. **Ensure the extension has `@raycast/api` installed** and the `verboseLogging` preference configured in `package.json`.
 
 4. **Run the extension in development:**
+
    ```bash
    # From the extension directory
    npm run dev
@@ -146,6 +156,7 @@ To test unreleased changes in a consuming Raycast extension:
 5. **Enable "Verbose Logging" in extension preferences** and check the console for logs.
 
 **To unlink:**
+
 ```bash
 # In the extension
 npm unlink @chrismessina/raycast-logger
@@ -164,11 +175,13 @@ npm unlink
 ## Redaction Patterns
 
 Automatically redacted fields in objects (key-based):
+
 - **Complete redaction (→ `"***"`):** `password`, `pass`, `pwd`, `secret`, `token`, `auth`, `authorization`, `applepassword`
 - **Numeric redaction (→ `0`):** `code`, `otp`, `2fa` (numeric values)
 - **Email masking (→ `u***@example.com`):** `email`, `appleid`, `apple_id`, `username`, `user`
 
 Automatically redacted patterns in strings (regex-based):
+
 - Bearer tokens: `Bearer abc123` → `Bearer ***`
 - Key-value pairs: `password=secret123` → `password=***`
 - 2FA codes: `code=123456` → `code=******`
