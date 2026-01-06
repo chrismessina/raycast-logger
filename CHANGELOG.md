@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `warn()` now displays `[WARN]` label prefix
 - All log methods now support optional color output
 
+### Fixed security bug in inspect method
+
+- `inspect()` method now properly redacts sensitive data in objects
+
 ## [1.0.0] - 2025-10-18
 
 ### Added

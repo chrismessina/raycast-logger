@@ -44,7 +44,7 @@ export function redactString(input: string): string {
  * @param value The value to potentially redact
  * @returns Redacted value if key indicates sensitive data
  */
-function redactValueByKey(key: string, value: unknown): unknown {
+export function redactValueByKey(key: string, value: unknown): unknown {
   const k = key.toLowerCase();
   if (value == null) return value;
 
