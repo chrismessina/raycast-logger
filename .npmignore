@@ -4,4 +4,3 @@ tsconfig.json
 *.log
 .DS_Store
 node_modules/
-.github/.private
