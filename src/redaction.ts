@@ -23,7 +23,18 @@ function maskEmail(text: string): string {
  * @returns Sanitized string with sensitive data redacted
  */
 export function redactString(input: string): string {
-  let s = input;
+  // Step 1: Preserve URLs by replacing them with placeholders
+  // This prevents URL paths from being incorrectly matched by hex/base64 patterns
+  const urlPlaceholders: string[] = [];
+  let s = input.replace(
+    /https?:\/\/[^\s"'<>\])}]+/gi,
+    (match) => {
+      urlPlaceholders.push(match);
+      return `__URL_PLACEHOLDER_${urlPlaceholders.length - 1}__`;
+    }
+  );
+
+  // Step 2: Apply redactions (these won't touch the placeholders)
   // Mask bearer tokens
   s = s.replace(/bearer\s+[^\s"']+/gi, "Bearer ***");
   // Mask key/value secrets
@@ -35,6 +46,13 @@ export function redactString(input: string): string {
   s = s.replace(/[A-Za-z0-9+/]{20,}={0,2}/g, "***");
   // Mask emails
   s = maskEmail(s);
+
+  // Step 3: Restore URLs
+  s = s.replace(
+    /__URL_PLACEHOLDER_(\d+)__/g,
+    (_, idx) => urlPlaceholders[parseInt(idx)]
+  );
+
   return s;
 }
 
