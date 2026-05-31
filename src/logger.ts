@@ -202,15 +202,20 @@ export class Logger {
 
   /**
    * Process message and arguments for logging
+   *
+   * Redaction is applied to the user-supplied message and args ONLY — never to the
+   * developer-authored formatting (prefix, timestamp, context). Those are constants set in code,
+   * not runtime data, and running them through redactString caused false positives (e.g. a long
+   * camelCase prefix like "[ProductHuntFrontpage]" matched the base64-token heuristic and became
+   * "[***]"). So we redact the raw message first, THEN format.
    */
   private processLogData(message: string, args: unknown[], levelColor?: string): [string, unknown[]] {
-    const formattedMessage = this.formatMessage(message, levelColor);
-
     if (!this.config.enableRedaction) {
-      return [formattedMessage, args];
+      return [this.formatMessage(message, levelColor), args];
     }
 
-    return [redactString(formattedMessage), sanitizeArgs(args)];
+    const redactedMessage = redactString(message);
+    return [this.formatMessage(redactedMessage, levelColor), sanitizeArgs(args)];
   }
 
   /**
