@@ -214,8 +214,7 @@ export class Logger {
       return [this.formatMessage(message, levelColor), args];
     }
 
-    const redactedMessage = redactString(message);
-    return [this.formatMessage(redactedMessage, levelColor), sanitizeArgs(args)];
+    return [this.formatMessage(redactString(message), levelColor), sanitizeArgs(args)];
   }
 
   /**
