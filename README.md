@@ -128,8 +128,10 @@ const logger = new Logger({
 });
 
 logger.info("Request received");
-// Output: [2026-01-05T10:30:00.000Z] [handler.ts:42] [INFO] Request received
+// Output: [INFO] [2026-01-05T10:30:00.000Z] [handler.ts:42] Request received
 ```
+
+The level label (`[INFO]`, `[ERROR]`, `[WARN]`) is printed first, followed by the timestamp, file context, and prefix.
 
 ### Performance Profiling
 
@@ -283,15 +285,27 @@ const safeArgs = sanitizeArgs([{ token: "abc123" }]); // -> [{ token: "***" }]
 
 ## What Gets Redacted?
 
-The logger automatically redacts:
+Redaction works two ways: **by key name** (for object properties in `args` and `inspect()`) and **by string pattern** (anywhere a value's text matches a known shape).
 
-- **Passwords**: `password`, `pass`, `pwd`, `secret`
-- **Tokens**: `token`, `auth`, `authorization`, `bearer`
-- **API Keys**: `key`, `apiKey`, `apikey`
-- **2FA Codes**: `code`, `otp`, `2fa`, `twofactor`
-- **Emails**: Partially masked (e.g., `u***@example.com`)
+**By key name** — properties whose key matches one of these are fully masked to `***`:
+
+- **Passwords / secrets**: `password`, `pass`, `pwd`, `secret`, `applepassword`
+- **Tokens / API keys**: `token`, `auth`, `authorization`, `bearer`, `key`, `apiKey`, `apikey`, `accessToken`, `apiToken`
+- **2FA codes**: `code`, `otp`, `2fa`, `twofactor`, `two_factor` → masked to `******` (numeric codes become `0`)
+- **Identifiers** (partially masked): `email`, `appleid`, `apple_id`, `username`, `user` → e.g. `u***@example.com`
+
+Key matching is **case-insensitive** but **exact** — `apiKey` is redacted, but `apiKeyValue` or `myApiKey` are not (their string contents may still be caught by the patterns below).
+
+**By string pattern** — applied to every logged string and to string values regardless of key:
+
+- **Labeled secrets**: `password=...`, `token: ...`, `secret=...`, etc. → value masked
+- **Bearer tokens**: `Bearer <token>` → `Bearer ***`
+- **Labeled 2FA codes**: `code: 1234`, `otp=567890` → digits masked
+- **Emails**: partially masked (e.g., `u***@example.com`)
 - **Long hex strings**: 32+ characters (potential tokens/hashes)
-- **Base64 strings**: 20+ characters (potential encoded secrets)
+- **Base64-like strings**: 20+ characters (potential encoded secrets)
+
+URLs are preserved intact and excluded from the hex/base64 patterns.
 
 ## Color Scheme
 

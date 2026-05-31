@@ -65,8 +65,24 @@ export function redactByKey(key: string, value: unknown): unknown {
   if (value == null) return value;
 
   if (typeof value === "string") {
-    // Complete redaction for passwords and tokens
-    if (["password", "pass", "pwd", "secret", "token", "auth", "authorization", "applepassword"].includes(k)) {
+    // Complete redaction for passwords, tokens, and API keys
+    if (
+      [
+        "password",
+        "pass",
+        "pwd",
+        "secret",
+        "token",
+        "auth",
+        "authorization",
+        "applepassword",
+        "key",
+        "apikey",
+        "accesstoken",
+        "apitoken",
+        "bearer",
+      ].includes(k)
+    ) {
       return "***";
     }
     // Redact 2FA codes
