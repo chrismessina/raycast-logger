@@ -18,6 +18,18 @@ Using **npm** (detected from `package-lock.json`).
   npm run build
   ```
 
+- **Run the test suite:**
+
+  ```bash
+  npm test
+  ```
+
+- **Type-check without emitting:**
+
+  ```bash
+  npm run typecheck
+  ```
+
 - **Watch for changes (development):**
 
   ```bash
@@ -47,7 +59,7 @@ Using **npm** (detected from `package-lock.json`).
   npm run clean
   ```
 
-**Note:** No lint, type-check, or test scripts are configured in this package. Type checking is enforced via `tsconfig.json` with `strict: true` at build time.
+Type checking is enforced via `tsconfig.json` with `strict: true` at build time and in the dedicated `typecheck` script. Tests use Node's built-in test runner against the compiled CommonJS output.
 
 ## High-Level Architecture
 
@@ -71,7 +83,8 @@ Using **npm** (detected from `package-lock.json`).
      - Bearer tokens (`Bearer ***`)
      - Key-value secrets: `password=***`, `token=***`, `apiKey=***`, etc.
      - 2FA codes (6–8 digits masked as `******`)
-     - Long hex/base64 strings (32+ chars or 20+ base64 chars assumed to be hashes/tokens)
+     - Conservative long hex/base64 detection that avoids plain words and decimal IDs
+     - Credentials in URL userinfo, query parameters, and OAuth-style fragments
      - Email addresses (first char + `***` + domain: `u***@example.com`)
    - Depth-aware object traversal: recursively inspects nested objects and arrays
 
@@ -176,17 +189,18 @@ npm unlink
 
 Automatically redacted fields in objects (key-based):
 
-- **Complete redaction (→ `"***"`):** `password`, `pass`, `pwd`, `secret`, `token`, `auth`, `authorization`, `applepassword`
-- **Numeric redaction (→ `0`):** `code`, `otp`, `2fa` (numeric values)
+- **Complete redaction (→ `"***"`):** password, secret, token, authorization, API-key, and private-key variants, including snake_case and kebab-case spellings
+- **Numeric redaction (→ `0`):** `code`, `otp`, `2fa`, `twofactor`, and equivalent separator variants
 - **Email masking (→ `u***@example.com`):** `email`, `appleid`, `apple_id`, `username`, `user`
 
 Automatically redacted patterns in strings (regex-based):
 
 - Bearer tokens: `Bearer abc123` → `Bearer ***`
-- Key-value pairs: `password=secret123` → `password=***`
+- Key-value pairs preserve their delimiter: `password=secret123` → `password=***`, `token: abc` → `token: ***`
 - 2FA codes: `code=123456` → `code=******`
 - Hex strings: 32+ characters assumed token/hash
-- Base64 strings: 20+ characters assumed encoded secret
+- Base64 strings: complete 20+ character blocks with an encoding signal; plain words and digit-only IDs are preserved
+- URL credentials: userinfo and sensitive query/fragment parameters are masked while benign URLs remain unchanged
 
 ## Documentation References
 

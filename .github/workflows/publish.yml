@@ -2,29 +2,50 @@ name: Publish Package
 
 on:
   release:
-    types: [created]
+    types: [published]
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
       - run: npm ci
-      - run: npm run build
+      - run: npm test
+      - run: npm audit --audit-level=high
       - name: Publish to npm
+        env:
+          # Token auth. `id-token: write` above mints the provenance attestation
+          # but is NOT a publish credential — without this token, `npm publish`
+          # fails with ENEEDAUTH. The alternative is npm trusted publishing,
+          # which requires registering this repo and workflow filename on
+          # npmjs.com first and dropping `--provenance` (it becomes automatic).
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           NAME="$(node -p "require('./package.json').name")"
+          if [ "$RELEASE_TAG" != "v$VERSION" ]; then
+            echo "Release tag $RELEASE_TAG does not match package version v$VERSION."
+            exit 1
+          fi
           if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "$NAME@$VERSION is already published — skipping."
+          elif [ "$PRERELEASE" = "true" ]; then
+            npm publish --provenance --tag next
           else
-            npm publish --access public
+            npm publish --provenance
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

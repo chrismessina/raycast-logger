@@ -1,5 +1,5 @@
 import { getPreferenceValues } from "@raycast/api";
-import { redactByKey, redactString, sanitizeArgs } from "./redaction";
+import { redactString, sanitizeArgs } from "./redaction";
 
 /**
  * ANSI color codes for terminal output (zero dependencies)
@@ -116,7 +116,21 @@ export class Logger {
       return preferences.verboseLogging || false;
     } catch (error) {
       // If preferences can't be read, default to not logging
-      console.error("[Logger] Failed to read preferences for verbose logging:", error);
+      console.error("[Logger] Failed to read preferences for verbose logging:", ...sanitizeArgs([error]));
+      return false;
+    }
+  }
+
+  /**
+   * Treat a failing custom preference callback like an unavailable Raycast
+   * preference: report it safely and suppress verbose output rather than
+   * letting diagnostic logging crash the caller.
+   */
+  private isVerboseEnabled(): boolean {
+    try {
+      return this.config.isVerboseEnabled();
+    } catch (error) {
+      console.error("[Logger] Failed to determine verbose logging state:", ...sanitizeArgs([error]));
       return false;
     }
   }
@@ -229,14 +243,14 @@ export class Logger {
    * ```
    */
   public log(message: string, ...args: unknown[]): void {
-    if (this.config.isVerboseEnabled()) {
+    if (this.isVerboseEnabled()) {
       const [processedMessage, processedArgs] = this.processLogData(message, args, colors.cyan);
       console.log(processedMessage, ...processedArgs);
     }
   }
 
   /**
-   * Log an error message (always shown regardless of verbose setting)
+   * Log an error message (emitted regardless of the verbose setting)
    * @param message The error message to log
    * @param args Additional arguments to log
    *
@@ -253,7 +267,7 @@ export class Logger {
   }
 
   /**
-   * Log a warning message (always shown regardless of verbose setting)
+   * Log a warning message (emitted regardless of the verbose setting)
    * @param message The warning message to log
    * @param args Additional arguments to log
    *
@@ -270,7 +284,7 @@ export class Logger {
   }
 
   /**
-   * Log an informational message (always shown regardless of verbose setting)
+   * Log an informational message (emitted regardless of the verbose setting)
    * Use for important operational messages that aren't warnings or errors.
    * @param message The info message to log
    * @param args Additional arguments to log
@@ -300,7 +314,7 @@ export class Logger {
    * ```
    */
   public debug(message: string, ...args: unknown[]): void {
-    if (this.config.isVerboseEnabled()) {
+    if (this.isVerboseEnabled()) {
       const label = this.colorize("[DEBUG]", colors.gray);
       const [processedMessage, processedArgs] = this.processLogData(message, args, colors.gray);
       console.debug(label, processedMessage, ...processedArgs);
@@ -358,7 +372,7 @@ export class Logger {
    * ```
    */
   public step(step: number | string, description: string, data?: Record<string, unknown>): void {
-    if (!this.config.isVerboseEnabled()) return;
+    if (!this.isVerboseEnabled()) return;
 
     const label = this.colorize(`[Step ${step}]`, colors.cyan, colors.bold);
     const [processedMessage, processedArgs] = this.processLogData(description, data ? [data] : []);
@@ -385,24 +399,28 @@ export class Logger {
    * ```
    */
   public inspect(label: string, value: unknown): void {
-    if (!this.config.isVerboseEnabled()) return;
+    if (!this.isVerboseEnabled()) return;
 
-    const separator = "=".repeat(Math.max(0, 40 - label.length - 2));
-    const header = this.colorize(`=== ${label} ${separator}`, colors.magenta, colors.bold);
-    const footer = this.colorize(`=== End ${label} ${"=".repeat(Math.max(0, 36 - label.length))}`, colors.magenta);
+    const safeLabel = this.config.enableRedaction ? redactString(label) : label;
+    const separator = "=".repeat(Math.max(0, 40 - safeLabel.length - 2));
+    const header = this.colorize(`=== ${safeLabel} ${separator}`, colors.magenta, colors.bold);
+    const footer = this.colorize(
+      `=== End ${safeLabel} ${"=".repeat(Math.max(0, 36 - safeLabel.length))}`,
+      colors.magenta,
+    );
 
     let formatted: string;
     try {
       if (this.config.enableRedaction) {
-        const sanitized = JSON.parse(
-          JSON.stringify(value, (key, val) => redactByKey(key, val)),
-        );
-        formatted = JSON.stringify(sanitized, null, 2);
+        const sanitized = sanitizeArgs([value])[0];
+        formatted = typeof sanitized === "string" ? sanitized : JSON.stringify(sanitized, null, 2);
       } else {
         formatted = JSON.stringify(value, null, 2);
       }
     } catch {
-      formatted = String(value);
+      formatted = this.config.enableRedaction
+        ? "[unserializable value — withheld to avoid logging unredacted data]"
+        : String(value);
     }
 
     console.log(this.formatMessage(header));
@@ -438,9 +456,9 @@ export class Logger {
  * ```typescript
  * import { logger } from "@chrismessina/raycast-logger";
  *
- * logger.log("This only shows if verbose logging is enabled");
- * logger.error("This always shows");
- * logger.warn("This always shows");
+ * logger.log("Emitted only when verbose logging is enabled");
+ * logger.error("Emitted regardless of the verbose preference");
+ * logger.warn("Emitted regardless of the verbose preference");
  * ```
  */
 export const logger = Logger.getInstance();

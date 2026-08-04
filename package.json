@@ -1,17 +1,26 @@
 {
   "name": "@chrismessina/raycast-logger",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "A secure, preference-driven logger for Raycast extensions with automatic redaction of sensitive data",
+  "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test",
     "clean": "rm -rf dist"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "raycast",

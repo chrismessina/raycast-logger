@@ -50,7 +50,7 @@ import { logger } from "@chrismessina/raycast-logger";
 logger.log("Processing request", { userId: 123 });
 logger.debug("Cache state", { hits: 42, misses: 3 });
 
-// Always shown (errors, warnings, info)
+// Emitted regardless of the verbose preference (errors, warnings, info)
 logger.error("Authentication failed", { error: "Invalid credentials" });
 logger.warn("Rate limit approaching", { remaining: 10 });
 logger.info("Extension initialized", { version: "1.0.0" });
@@ -78,13 +78,15 @@ logger.info("Server connected", { host: "api.example.com" });
 
 ### Log Levels
 
-| Method | Visibility | Color | Use Case |
-|--------|------------|-------|----------|
-| `error()` | Always | Red | Failures, exceptions |
-| `warn()` | Always | Yellow | Important notices, deprecations |
-| `info()` | Always | Blue | Operational messages |
+| Method | Emitted | Color | Use Case |
+|--------|---------|-------|----------|
+| `error()` | Regardless of preference | Red | Failures, exceptions |
+| `warn()` | Regardless of preference | Yellow | Important notices, deprecations |
+| `info()` | Regardless of preference | Blue | Operational messages |
 | `log()` | Verbose only | Cyan | General debug output |
 | `debug()` | Verbose only | Gray | Detailed diagnostics |
+
+> **Emitted is not the same as visible.** "Regardless of preference" means the logger calls the corresponding `console` method without checking `verboseLogging` — it does not mean the output reaches a screen. Raycast disables console logging for extensions installed from the Store, so these calls are visible during development (`ray develop`) but not to end users. Use them for developer diagnostics, and surface anything a user needs to act on through a Toast or an error view instead.
 
 ### Automatic Redaction
 
@@ -243,7 +245,7 @@ logger.step(step: number | string, description: string, data?: Record<string, un
 logger.inspect(label: string, value: unknown): void
 logger.time(label: string): (meta?: Record<string, unknown>) => void
 
-// Always-shown methods
+// Emitted regardless of the verbose preference
 logger.error(message: string, ...args: unknown[]): void
 logger.warn(message: string, ...args: unknown[]): void
 logger.info(message: string, ...args: unknown[]): void
@@ -289,12 +291,12 @@ Redaction works two ways: **by key name** (for object properties in `args` and `
 
 **By key name** — properties whose key matches one of these are fully masked to `***`:
 
-- **Passwords / secrets**: `password`, `pass`, `pwd`, `secret`, `applepassword`
-- **Tokens / API keys**: `token`, `auth`, `authorization`, `bearer`, `key`, `apiKey`, `apikey`, `accessToken`, `apiToken`
-- **2FA codes**: `code`, `otp`, `2fa`, `twofactor`, `two_factor` → masked to `******` (numeric codes become `0`)
+- **Passwords / secrets**: `password`, `pass`, `pwd`, `secret`, `applepassword`, `apple_password`, `clientSecret`, `privateKey`, `signingKey`
+- **Tokens / API keys**: `token`, `auth`, `authorization`, `bearer`, `key`, `apiKey`, `accessToken`, `apiToken`, `refreshToken`, `idToken`, `oauthToken`
+- **2FA codes**: `code`, `otp`, `2fa`, `twofactor`, `two_factor`, `verificationCode`, `oneTimeCode` → masked to `******` (numeric codes become `0`)
 - **Identifiers** (partially masked): `email`, `appleid`, `apple_id`, `username`, `user` → e.g. `u***@example.com`
 
-Key matching is **case-insensitive** but **exact** — `apiKey` is redacted, but `apiKeyValue` or `myApiKey` are not (their string contents may still be caught by the patterns below).
+Key matching is **case-insensitive** and treats camelCase, snake_case, kebab-case, and space-separated spellings consistently, but remains exact — `apiKey` and `api_key` are redacted, while `apiKeyValue` and `myApiKey` are not (their string contents may still be caught by the patterns below). Credential keys are masked regardless of whether their value is a string, number, boolean, or object.
 
 **By string pattern** — applied to every logged string and to string values regardless of key:
 
@@ -302,10 +304,12 @@ Key matching is **case-insensitive** but **exact** — `apiKey` is redacted, but
 - **Bearer tokens**: `Bearer <token>` → `Bearer ***`
 - **Labeled 2FA codes**: `code: 1234`, `otp=567890` → digits masked
 - **Emails**: partially masked (e.g., `u***@example.com`)
-- **Long hex strings**: 32+ characters (potential tokens/hashes)
-- **Base64-like strings**: 20+ characters (potential encoded secrets)
+- **Long hex strings**: 32+ characters containing both digits and hexadecimal letters (potential tokens/hashes)
+- **Base64-like strings**: 20+ characters in complete base64 blocks with a digit, `+`, `/`, or padding signal
 
-URLs are preserved intact and excluded from the hex/base64 patterns.
+Benign URLs are preserved byte-for-byte and excluded from the hex/base64 patterns. Userinfo credentials and sensitive query or fragment parameters such as `access_token`, `api_key`, `client_secret`, and `password` are masked in whole URLs and URLs embedded in messages.
+
+Redaction is a defense-in-depth safeguard, not a substitute for avoiding secrets in logs. Ambiguous unlabeled values—especially unpadded, letters-only tokens—cannot be reliably distinguished from ordinary prose, so prefer structured objects with descriptive keys when logging potentially sensitive data.
 
 ## Color Scheme
 
@@ -328,9 +332,9 @@ When `colorize: true` (default):
 
 1. **Use `logger.log()` for debug info** - It respects the user's preference
 2. **Use `logger.debug()` for detailed diagnostics** - Extra-verbose output
-3. **Use `logger.info()` for operational messages** - Always visible, non-error info
-4. **Use `logger.error()` for errors** - Always visible to help with debugging
-5. **Use `logger.warn()` for warnings** - Always visible for important notices
+3. **Use `logger.info()` for operational messages** - Emitted regardless of preference, non-error info
+4. **Use `logger.error()` for errors** - Emitted regardless of preference to help with debugging
+5. **Use `logger.warn()` for warnings** - Emitted regardless of preference for important notices
 6. **Use `logger.step()` for flow tracking** - Helps LLMs understand execution order
 7. **Use `logger.time()` for performance** - Measure and log operation duration
 8. **Create child loggers** - Use prefixes to organize logs by feature/module
@@ -367,4 +371,4 @@ Chris Messina
 
 ## Contributing
 
-Issues and pull requests are welcome! Visit the [GitHub repository](https://github.com/chrismessina/raycast-logger).
+Issues and pull requests are welcome! Run `npm test` before submitting changes. Security reports should follow the [security policy](SECURITY.md) rather than being filed publicly.
