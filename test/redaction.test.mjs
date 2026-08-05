@@ -142,7 +142,26 @@ test("redactString: malformed URL escapes do not throw or bypass a sensitive raw
 });
 
 test("redactString: caller text resembling a placeholder is not rewritten", () => {
+  // The legacy `__URL_PLACEHOLDER_n__` form. Kept so the old shape stays inert,
+  // but it does NOT exercise the collision guard — see the test below.
   assert.equal(redactString("__URL_PLACEHOLDER_0__"), "__URL_PLACEHOLDER_0__");
+});
+
+test("redactString: caller text matching the REAL internal sentinel is preserved", () => {
+  // The implementation placeholders URLs with private-use-area sentinels
+  // (RAYCAST_LOGGER_URL_<n>), not the legacy underscore form above.
+  // Asserting the legacy string would pass even if the real collision guard
+  // regressed, so this pins the sentinel actually in use.
+  const sentinel = "RAYCAST_LOGGER_URL_0";
+  assert.equal(redactString(sentinel), sentinel);
+
+  // With a real URL alongside it, the caller's literal sentinel must survive
+  // byte-for-byte while the genuine URL is still processed.
+  const mixed = `${sentinel} and https://example.com/a?access_token=SECRET`;
+  const output = redactString(mixed);
+  assert.ok(output.startsWith(sentinel), "caller sentinel must be preserved verbatim");
+  assert.doesNotMatch(output, /SECRET/);
+  assert.match(output, /access_token=\*\*\*/);
 });
 
 test("redactString: ordinary prose is returned unchanged", () => {
@@ -513,4 +532,261 @@ test("redactString: a 9+ digit run is not partially masked", () => {
 test("redactString: ordinary prose containing the word 'code' is untouched", () => {
   assert.equal(redactString("the code is fine"), "the code is fine");
   assert.equal(redactString("error code ENOENT"), "error code ENOENT");
+});
+
+// ---------------------------------------------------------------------------
+// Regressions from the 2026-08-04 adversarial review of 8cef6e3.
+//
+// Every case below was a CONFIRMED secret leak reproduced against that commit.
+// Each asserts the leak is closed AND, where the fix risked over-masking, that
+// a sibling non-secret is still readable.
+// ---------------------------------------------------------------------------
+
+test("regression: a nested URL cannot hide its query secret inside an outer parameter", () => {
+  // The outer matcher consumed `?access_token=...` as part of `redirect`'s
+  // value, so the key it tested was `redirect` — not a credential.
+  const input = "https://example.test/?redirect=https://idp.test/cb?access_token=LEAK123&mode=x";
+  const output = redactString(input);
+  assert.doesNotMatch(output, /LEAK123/, `nested URL secret survived: ${output}`);
+  assert.match(output, /mode=x/, "benign sibling parameter must survive");
+});
+
+test("regression: semicolon-separated URL parameters are redacted", () => {
+  const output = redactString("https://a.test/?page=1;access_token=LEAK123");
+  assert.doesNotMatch(output, /LEAK123/);
+  assert.match(output, /page=1/);
+});
+
+test("regression: toJSON cannot move a credential onto an innocent key", () => {
+  // JSON.stringify calls toJSON BEFORE the replacer, so key-based redaction
+  // never saw `password` — it only saw `note`.
+  const value = {
+    password: "LEAK123",
+    toJSON() {
+      return { note: this.password };
+    },
+  };
+  assert.doesNotMatch(JSON.stringify(sanitizeArgs([value])), /LEAK123/);
+});
+
+test("regression: a second toJSON call cannot smuggle a different snapshot", () => {
+  // The old BigInt retry re-serialized the value, invoking toJSON again; the
+  // second call could return something the first never exposed.
+  let calls = 0;
+  const value = {
+    toJSON() {
+      return ++calls === 1 ? { n: 1n } : { note: "LEAK123" };
+    },
+  };
+  assert.doesNotMatch(JSON.stringify(sanitizeArgs([value])), /LEAK123/);
+});
+
+test("regression: an Error subclass with toJSON cannot bypass Error flattening", () => {
+  class LeakyError extends Error {
+    constructor() {
+      super("safe message");
+      this.name = "LeakyError";
+      this.password = "ERROR_SECRET";
+    }
+    toJSON() {
+      return { note: this.password };
+    }
+  }
+  const output = JSON.stringify(sanitizeArgs([new LeakyError()]));
+  assert.doesNotMatch(output, /ERROR_SECRET/);
+  // Flattening must still produce a useful error.
+  assert.match(output, /safe message/);
+  assert.match(output, /LeakyError/);
+});
+
+test("regression: environment-style compound credential keys are masked", () => {
+  for (const key of ["NPM_TOKEN", "GITHUB_TOKEN", "DB_PASSWORD", "STRIPE_SECRET", "MY_API_KEY"]) {
+    const output = JSON.stringify(sanitizeArgs([{ [key]: "LEAK123" }]));
+    assert.doesNotMatch(output, /LEAK123/, `${key} was not masked`);
+  }
+  assert.doesNotMatch(redactString("NPM_TOKEN=LEAK123"), /LEAK123/);
+  assert.doesNotMatch(redactString("GITHUB_ACCESS_TOKEN: LEAK123"), /LEAK123/);
+});
+
+test("regression: compound keys whose head noun is not a secret stay readable", () => {
+  // The counterweight to the rule above. Masking these would destroy exactly
+  // the diagnostics this package exists to preserve. `key` on its own is an
+  // overloaded English word — a cache key and a sort key are not credentials.
+  for (const key of ["cacheKey", "sortKey", "partitionKey", "publicKey", "idempotencyKey", "apiKeyValue"]) {
+    const output = JSON.stringify(sanitizeArgs([{ [key]: "PLAINVALUE" }]));
+    assert.match(output, /PLAINVALUE/, `${key} must not be masked`);
+  }
+});
+
+test("regression: 'apikey' as a two-word head noun is masked in either spelling", () => {
+  // v1.2.4 masked only the exact key `apiKey`. `myApiKey` and `MY_API_KEY` are
+  // the same credential wearing a prefix, and both now mask. This narrows the
+  // previously documented "exact match only" behavior on purpose.
+  for (const key of ["myApiKey", "MY_API_KEY", "stripeApiKey", "openai_api_key"]) {
+    const output = JSON.stringify(sanitizeArgs([{ [key]: "LEAK123" }]));
+    assert.doesNotMatch(output, /LEAK123/, `${key} was not masked`);
+  }
+});
+
+test("regression: underscore-form two_factor labels are masked in messages", () => {
+  assert.doesNotMatch(redactString("two_factor: 123456"), /123456/);
+  // The already-supported spellings must keep working.
+  assert.doesNotMatch(redactString("two-factor: 123456"), /123456/);
+  assert.doesNotMatch(redactString("two factor: 123456"), /123456/);
+});
+
+test("regression: getters are still invoked but a throwing one fails closed", () => {
+  const hostile = {
+    get boom() {
+      throw new Error("token=SECRET");
+    },
+  };
+  const result = sanitizeArgs([hostile])[0];
+  assert.equal(typeof result, "string");
+  assert.match(result, /withheld/);
+  assert.doesNotMatch(result, /SECRET/);
+});
+
+test("regression: Date and RegExp keep meaning now that toJSON is not called", () => {
+  // Date.toJSON is no longer invoked, so the walker must handle it explicitly
+  // or dates would collapse to `{}`.
+  const output = JSON.stringify(sanitizeArgs([{ when: new Date("2020-01-02T03:04:05.000Z"), re: /ab+c/gi }]));
+  assert.match(output, /2020-01-02T03:04:05/);
+  assert.match(output, /ab\+c/);
+});
+
+test("regression: a credential-named key holding an object is masked before traversal", () => {
+  const output = JSON.stringify(sanitizeArgs([{ a: { b: { token: { deep: "LEAK123" } } } }]));
+  assert.doesNotMatch(output, /LEAK123/);
+  assert.doesNotMatch(output, /deep/);
+});
+
+test("regression: a long delimiter chain cannot stall the credential matcher", () => {
+  // The env-prefix group is bounded to {0,6}. Unbounded, this input backtracked
+  // for ~2.5 seconds because every start position could consume an arbitrary
+  // run of `a-` before failing to find a credential word.
+  const hostile = "a-".repeat(30000) + "secret=x";
+  const started = process.hrtime.bigint();
+  const output = redactString(hostile);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+  assert.ok(elapsedMs < 1000, `credential matcher took ${elapsedMs.toFixed(0)}ms`);
+  assert.doesNotMatch(output, /secret=x/, "the credential must still be masked");
+});
+
+test("regression: realistic environment variable names still match within the bound", () => {
+  assert.equal(redactString("NPM_TOKEN=abc"), "NPM_TOKEN=***");
+  assert.equal(redactString("GITHUB_ACCESS_TOKEN: abc"), "GITHUB_ACCESS_TOKEN: ***");
+  assert.equal(redactString("tokenizer=keepme"), "tokenizer=keepme");
+});
+
+test("regression: shared g-flagged credential patterns stay deterministic across calls", () => {
+  // QUOTED_/BARE_CREDENTIAL_ASSIGNMENT are module-level RegExp objects reused
+  // on every call. They are safe only because String.replace resets lastIndex.
+  // If someone switches them to .test()/.exec(), redaction silently becomes
+  // order-dependent — this pins that it does not.
+  const inputs = ["token=AAA", "password=BBB and token=CCC", "no secrets here", "NPM_TOKEN=DDD"];
+  const expected = inputs.map((input) => redactString(input));
+
+  for (let round = 0; round < 100; round++) {
+    inputs.forEach((input, index) => {
+      assert.equal(redactString(input), expected[index], `drifted on round ${round}: ${input}`);
+    });
+  }
+  // And the expected values must actually be masked, so this cannot pass by
+  // comparing four identical unredacted strings.
+  assert.doesNotMatch(expected.join(" "), /AAA|BBB|CCC|DDD/);
+});
+
+// ---------------------------------------------------------------------------
+// Second review round (2026-08-04). Findings the first round of fixes missed.
+// ---------------------------------------------------------------------------
+
+test("regression: credential keys mask EVERY runtime type, not just strings", () => {
+  // The credential guard originally ran after the primitive type dispatch, so
+  // bigint/symbol/function values converted themselves to text and returned
+  // before it was reached — contradicting the documented contract.
+  function LEAKFN() {}
+  const cases = [
+    { token: 12345678901234567890n },
+    { token: Symbol("LEAKSYM") },
+    { token: LEAKFN },
+    { NPM_TOKEN: 98765432109876543210n },
+  ];
+  for (const value of cases) {
+    const output = JSON.stringify(sanitizeArgs([value]));
+    assert.doesNotMatch(output, /12345678901234567890|LEAKSYM|LEAKFN|98765432109876543210/, output);
+    assert.match(output, /\*\*\*/);
+  }
+});
+
+test("regression: hostile built-in overrides cannot emit raw strings", () => {
+  // Date/RegExp/URL are read through intrinsic prototype methods, so an
+  // override cannot hand the walker an arbitrary attacker-chosen string.
+  class HostileDate extends Date {
+    toISOString() {
+      return "LEAKDATE";
+    }
+  }
+  const hostileRegExp = /x/;
+  hostileRegExp.toString = () => "LEAKREGEXP";
+  const hostileUrl = new URL("https://example.test/");
+  Object.defineProperty(hostileUrl, "href", { get: () => "LEAKURL" });
+
+  const output = JSON.stringify(sanitizeArgs([{ d: new HostileDate(), r: hostileRegExp, u: hostileUrl }]));
+  assert.doesNotMatch(output, /LEAKDATE|LEAKREGEXP|LEAKURL/, output);
+});
+
+test("regression: toJSON is never INVOKED, not merely ignored", () => {
+  // The earlier tests only asserted the output lacked a secret. A regression
+  // that called toJSON once and emitted a benign first snapshot would pass
+  // while violating the stated invariant — so count the calls.
+  let calls = 0;
+  const value = {
+    safe: "visible",
+    toJSON() {
+      calls += 1;
+      return { note: "from-toJSON" };
+    },
+  };
+  const output = JSON.stringify(sanitizeArgs([value]));
+  assert.equal(calls, 0, "toJSON must never be invoked");
+  assert.match(output, /visible/);
+  assert.doesNotMatch(output, /from-toJSON/);
+});
+
+test("regression: percent-encoded nested URLs cannot hide a credential", () => {
+  const input = "https://example.test/?redirect=https%3A%2F%2Fidp.test%2Fcb%3Faccess_token%3DLEAKENC";
+  const output = redactString(input);
+  assert.doesNotMatch(output, /LEAKENC/, output);
+});
+
+test("regression: ubiquitous env credential names are masked", () => {
+  for (const key of ["DB_PASS", "DB_AUTH", "authorizationHeader", "AUTH_TOKEN"]) {
+    const output = JSON.stringify(sanitizeArgs([{ [key]: "LEAK123" }]));
+    assert.doesNotMatch(output, /LEAK123/, `${key} was not masked`);
+  }
+});
+
+test("regression: long env-style labels are masked in messages", () => {
+  // The prefix bound was raised from 6 to 12 after a 7-segment label leaked.
+  assert.doesNotMatch(redactString("FOO_BAR_BAZ_QUX_QUUX_CORGE_GRAULT_TOKEN=LEAKLABEL"), /LEAKLABEL/);
+});
+
+test("regression: a __proto__ key cannot reparent the returned object", () => {
+  // Plain assignment invoked the inherited __proto__ setter and reparented the
+  // result instead of creating an own property.
+  const payload = JSON.parse(String.raw`{"__proto__":{"inherited":"LEAKPROTO"},"ok":1}`);
+  const result = sanitizeArgs([payload])[0];
+  const prototype = Object.getPrototypeOf(result);
+  assert.notEqual(prototype?.inherited, "LEAKPROTO");
+  assert.equal({}.inherited, undefined, "global Object.prototype must be clean");
+});
+
+test("regression: an Error with very many own properties is bounded", () => {
+  const error = new Error("boom");
+  for (let index = 0; index < 1000; index++) error[`prop${index}`] = index;
+  const result = sanitizeArgs([error])[0];
+  assert.ok(Object.keys(result).length <= 205, `unbounded error walk: ${Object.keys(result).length}`);
+  assert.match(JSON.stringify(result), /boom/);
 });

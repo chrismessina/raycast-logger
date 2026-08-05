@@ -296,18 +296,48 @@ Redaction works two ways: **by key name** (for object properties in `args` and `
 - **2FA codes**: `code`, `otp`, `2fa`, `twofactor`, `two_factor`, `verificationCode`, `oneTimeCode` → masked to `******` (numeric codes become `0`)
 - **Identifiers** (partially masked): `email`, `appleid`, `apple_id`, `username`, `user` → e.g. `u***@example.com`
 
-Key matching is **case-insensitive** and treats camelCase, snake_case, kebab-case, and space-separated spellings consistently, but remains exact — `apiKey` and `api_key` are redacted, while `apiKeyValue` and `myApiKey` are not (their string contents may still be caught by the patterns below). Credential keys are masked regardless of whether their value is a string, number, boolean, or object.
+Key matching is **case-insensitive** and treats camelCase, snake_case, kebab-case, and space-separated spellings consistently. Credential keys are masked regardless of whether their value is a string, number, boolean, or object — an object parked under a credential key is masked whole, never traversed.
+
+**Compound keys** are matched on their *head noun* — the last word — so environment-style names are covered:
+
+| Key | Masked? | Why |
+|-----|---------|-----|
+| `NPM_TOKEN`, `GITHUB_TOKEN`, `DB_PASSWORD` | yes | head noun is `token` / `password` |
+| `myApiKey`, `MY_API_KEY`, `stripeApiKey` | yes | head noun is the two-word term `apiKey` |
+| `DB_PASS`, `DB_AUTH` | yes | head noun is `pass` / `auth` |
+| `authorizationHeader`, `tokenValue` | yes | contains an unambiguous credential word |
+| `cacheKey`, `sortKey`, `partitionKey`, `publicKey` | **no** | head noun is bare `key`, which is overloaded and rarely a secret |
+| `apiKeyValue` | **no** | head noun is `value`, and `key` alone doesn't qualify |
+| `statusCode`, `errorCode`, `exitCode` | **no** | `code` is excluded — see `error.code` below |
+| `tokenizer`, `monkey`, `passenger` | **no** | single word; `token`/`key`/`pass` is a fragment, not a segment |
+
+Matching works on three rules, in order: an exact whole-key match; the **head noun** (final segment, or final two joined); or an unambiguous credential word **anywhere** in the key.
+
+The distinction between "head only" and "anywhere" is deliberate. `pass` and `auth` qualify only as a head, so `DB_PASS` masks while `passThrough` and `authFlow` do not. `key` and `code` never qualify as compound terms at all — masking `cacheKey` or `error.code` would destroy exactly the diagnostics this package exists to preserve — though both still mask on an exact whole-key match.
+
+The cost is accepted knowingly: `cancellationToken` and `refreshTokenExpiresAt` are masked despite not being secrets. Masking a non-secret loses a diagnostic; missing a secret leaks it.
 
 **By string pattern** — applied to every logged string and to string values regardless of key:
 
-- **Labeled secrets**: `password=...`, `token: ...`, `secret=...`, etc. → value masked
+- **Labeled secrets**: `password=...`, `token: ...`, `secret=...`, and env-style `NPM_TOKEN=...` → value masked
 - **Bearer tokens**: `Bearer <token>` → `Bearer ***`
 - **Labeled 2FA codes**: `code: 1234`, `otp=567890` → digits masked
 - **Emails**: partially masked (e.g., `u***@example.com`)
 - **Long hex strings**: 32+ characters containing both digits and hexadecimal letters (potential tokens/hashes)
 - **Base64-like strings**: 20+ characters in complete base64 blocks with a digit, `+`, `/`, or padding signal
 
-Benign URLs are preserved byte-for-byte and excluded from the hex/base64 patterns. Userinfo credentials and sensitive query or fragment parameters such as `access_token`, `api_key`, `client_secret`, and `password` are masked in whole URLs and URLs embedded in messages.
+Benign URLs are preserved byte-for-byte and excluded from the hex/base64 patterns. Userinfo credentials and sensitive query or fragment parameters such as `access_token`, `api_key`, `client_secret`, and `password` are masked in whole URLs and URLs embedded in messages. `?`, `&`, `#`, and `;` all delimit parameters, so a credential in a **nested** URL (`?redirect=https://idp/cb?access_token=...`) or after a semicolon is masked rather than hidden inside the outer parameter's value.
+
+**Objects are walked directly, not serialized through `JSON.stringify`.** A custom `toJSON()` is never invoked, because it runs *before* any redaction and could move a credential onto an innocent-looking key:
+
+```typescript
+// The credential is masked even though toJSON() renames it.
+logger.info("state", { password: "hunter2", toJSON() { return { note: this.password }; } });
+```
+
+`Date`, `RegExp`, and `URL` are handled explicitly so they keep their meaning, and are read through their **intrinsic prototype methods** — a subclass overriding `toISOString`, or an object with an own `href` getter, cannot hand the walker an arbitrary string that bypasses redaction. Circular references render as `[Circular]` with sibling fields preserved, and traversal is bounded (depth 12, 200 object entries, 500 array entries) with explicit truncation markers.
+
+Getters *are* still invoked, matching v1 behavior — this is a redaction boundary, not a side-effect-free snapshotter. A throwing getter turns the whole argument into a withheld marker rather than leaking it.
 
 Redaction is a defense-in-depth safeguard, not a substitute for avoiding secrets in logs. Ambiguous unlabeled values—especially unpadded, letters-only tokens—cannot be reliably distinguished from ordinary prose, so prefer structured objects with descriptive keys when logging potentially sensitive data.
 

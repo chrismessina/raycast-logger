@@ -56,15 +56,20 @@ test("Logger: child loggers preserve configuration and compose prefixes", () => 
   assert.deepEqual(calls, [["[Parent] [Child] ready"]]);
 });
 
-test("Logger: inspect fails closed for circular objects", () => {
+test("Logger: inspect marks the cycle without leaking, and keeps the rest diagnostic", () => {
   const logger = new Logger({ isVerboseEnabled: () => true, colorize: false });
-  const circular = { password: "hunter2" };
+  const circular = { password: "hunter2", userId: 42 };
   circular.self = circular;
 
   const calls = captureConsole("log", () => logger.inspect("payload", circular));
   assert.equal(calls.length, 3);
+  // The security property: the credential never reaches the console.
   assert.doesNotMatch(calls.flat().join("\n"), /hunter2/);
-  assert.match(calls[1][0], /withheld/);
+  assert.match(calls[1][0], /"password": "\*\*\*"/);
+  // The cyclic edge is marked rather than withholding the whole object, so
+  // sibling fields stay readable. v1.2.4 withheld everything on any cycle.
+  assert.match(calls[1][0], /"self": "\[Circular\]"/);
+  assert.match(calls[1][0], /"userId": 42/);
 });
 
 test("Logger: a throwing verbosity callback cannot crash the caller or leak its error", () => {
@@ -79,4 +84,55 @@ test("Logger: a throwing verbosity callback cannot crash the caller or leak its 
   assert.equal(calls.length, 1);
   assert.doesNotMatch(JSON.stringify(calls), /token=secret/);
   assert.match(JSON.stringify(calls), /token=\*\*\*/);
+});
+
+// ---------------------------------------------------------------------------
+// Regressions from the 2026-08-04 adversarial review of 8cef6e3.
+// ---------------------------------------------------------------------------
+
+test("regression: an interpolated prefix is redacted before formatting", () => {
+  // The prefix reaches the console outside processLogData, so it printed raw
+  // while the message beside it was masked.
+  const logger = new Logger({
+    prefix: "[token: PREFIX_SECRET]",
+    isVerboseEnabled: () => true,
+    colorize: false,
+  });
+  const calls = captureConsole("error", () => logger.error("boom"));
+  assert.doesNotMatch(calls.flat().join(" "), /PREFIX_SECRET/);
+});
+
+test("regression: ordinary camelCase prefixes are not mangled by redaction", () => {
+  // The counterweight: prefixes were originally left raw because a long
+  // camelCase prefix tripped the old base64 heuristic and became "[***]".
+  for (const prefix of ["[ProductHuntFrontpage]", "[GitHub]", "[OAuthTokenRefresher]"]) {
+    const logger = new Logger({ prefix, isVerboseEnabled: () => true, colorize: false });
+    const calls = captureConsole("error", () => logger.error("boom"));
+    assert.match(calls.flat().join(" "), new RegExp(prefix.replace(/[[\]]/g, "\\$&")));
+  }
+});
+
+test("regression: a step identifier is redacted before formatting", () => {
+  const logger = new Logger({ isVerboseEnabled: () => true, colorize: false });
+  const calls = captureConsole("log", () => logger.step("token: STEP_SECRET", "doing work"));
+  assert.doesNotMatch(calls.flat().join(" "), /STEP_SECRET/);
+});
+
+test("regression: ordinary step numbers are unaffected", () => {
+  const logger = new Logger({ isVerboseEnabled: () => true, colorize: false });
+  const calls = captureConsole("log", () => logger.step(3, "doing work"));
+  assert.match(calls.flat().join(" "), /\[Step 3\]/);
+});
+
+test("regression: enableRedaction:false still bypasses prefix and step redaction", () => {
+  const logger = new Logger({
+    prefix: "[token: RAW]",
+    isVerboseEnabled: () => true,
+    enableRedaction: false,
+    colorize: false,
+  });
+  const calls = captureConsole("log", () => logger.step("token: RAWSTEP", "work"));
+  const output = calls.flat().join(" ");
+  assert.match(output, /RAW/);
+  assert.match(output, /RAWSTEP/);
 });

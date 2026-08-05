@@ -183,6 +183,15 @@ export class Logger {
   }
 
   /**
+   * Redact a developer-supplied formatting input when redaction is enabled.
+   * Applies to values that are interpolated at runtime — the prefix and the
+   * step identifier — which reach the console outside `processLogData`.
+   */
+  private safeText(text: string): string {
+    return this.config.enableRedaction ? redactString(text) : text;
+  }
+
+  /**
    * Format a message with optional timestamp, context, and prefix
    */
   private formatMessage(message: string, levelColor?: string): string {
@@ -201,7 +210,14 @@ export class Logger {
     }
 
     if (this.config.prefix) {
-      parts.push(this.colorize(this.config.prefix, colors.magenta));
+      // The prefix is redacted despite being developer-authored: it is a public
+      // runtime input, and an interpolated one (`[Account ${email}]`,
+      // `[token: ${t}]`) otherwise printed verbatim while the message beside it
+      // was masked. This was originally left raw because a long camelCase
+      // prefix like "[ProductHuntFrontpage]" tripped the old base64 heuristic
+      // and became "[***]"; that heuristic now requires a digit, `+`, `/`, or
+      // padding signal, so ordinary prefixes pass through untouched.
+      parts.push(this.colorize(this.safeText(this.config.prefix), colors.magenta));
     }
 
     // Apply level color to the message if provided
@@ -374,7 +390,9 @@ export class Logger {
   public step(step: number | string, description: string, data?: Record<string, unknown>): void {
     if (!this.isVerboseEnabled()) return;
 
-    const label = this.colorize(`[Step ${step}]`, colors.cyan, colors.bold);
+    // The step identifier is caller-supplied and reaches the console outside
+    // processLogData, so it needs the same redaction as the description.
+    const label = this.colorize(`[Step ${this.safeText(String(step))}]`, colors.cyan, colors.bold);
     const [processedMessage, processedArgs] = this.processLogData(description, data ? [data] : []);
     console.log(label, processedMessage, ...processedArgs);
   }
@@ -401,7 +419,7 @@ export class Logger {
   public inspect(label: string, value: unknown): void {
     if (!this.isVerboseEnabled()) return;
 
-    const safeLabel = this.config.enableRedaction ? redactString(label) : label;
+    const safeLabel = this.safeText(label);
     const separator = "=".repeat(Math.max(0, 40 - safeLabel.length - 2));
     const header = this.colorize(`=== ${safeLabel} ${separator}`, colors.magenta, colors.bold);
     const footer = this.colorize(
