@@ -37,9 +37,22 @@ test("package root: preserves the documented runtime API", () => {
 });
 
 test("Logger: verbose methods remain gated", () => {
+  // Every gated method, not just log() — gating removed from debug/step/inspect
+  // individually would otherwise go unnoticed.
   const logger = new Logger({ isVerboseEnabled: () => false, colorize: false });
-  const calls = captureConsole("log", () => logger.log("hidden"));
-  assert.deepEqual(calls, []);
+  assert.deepEqual(captureConsole("log", () => logger.log("hidden")), []);
+  assert.deepEqual(captureConsole("debug", () => logger.debug("hidden")), []);
+  assert.deepEqual(captureConsole("log", () => logger.step(1, "hidden")), []);
+  assert.deepEqual(captureConsole("log", () => logger.inspect("hidden", { a: 1 })), []);
+  assert.deepEqual(captureConsole("log", () => logger.time("hidden")()), []);
+});
+
+test("Logger: methods that ignore the preference each still emit", () => {
+  // error() was the only one covered; gating warn() or info() passed silently.
+  const logger = new Logger({ isVerboseEnabled: () => false, colorize: false });
+  assert.equal(captureConsole("error", () => logger.error("e")).length, 1);
+  assert.equal(captureConsole("warn", () => logger.warn("w")).length, 1);
+  assert.equal(captureConsole("info", () => logger.info("i")).length, 1);
 });
 
 test("Logger: always-visible methods redact messages and structured args", () => {
@@ -99,7 +112,12 @@ test("regression: an interpolated prefix is redacted before formatting", () => {
     colorize: false,
   });
   const calls = captureConsole("error", () => logger.error("boom"));
-  assert.doesNotMatch(calls.flat().join(" "), /PREFIX_SECRET/);
+  const output = calls.flat().join(" ");
+  // Absence alone would pass if the logger suppressed output entirely.
+  assert.equal(calls.length, 1, "the log line must still be emitted");
+  assert.doesNotMatch(output, /PREFIX_SECRET/);
+  assert.match(output, /token: \*\*\*/, `prefix must be masked, not dropped: ${output}`);
+  assert.match(output, /boom/, "the message must survive");
 });
 
 test("regression: ordinary camelCase prefixes are not mangled by redaction", () => {
@@ -115,7 +133,11 @@ test("regression: ordinary camelCase prefixes are not mangled by redaction", () 
 test("regression: a step identifier is redacted before formatting", () => {
   const logger = new Logger({ isVerboseEnabled: () => true, colorize: false });
   const calls = captureConsole("log", () => logger.step("token: STEP_SECRET", "doing work"));
-  assert.doesNotMatch(calls.flat().join(" "), /STEP_SECRET/);
+  const output = calls.flat().join(" ");
+  assert.equal(calls.length, 1, "the step line must still be emitted");
+  assert.doesNotMatch(output, /STEP_SECRET/);
+  assert.match(output, /token: \*\*\*/, `step id must be masked, not dropped: ${output}`);
+  assert.match(output, /doing work/, "the description must survive");
 });
 
 test("regression: ordinary step numbers are unaffected", () => {
@@ -133,6 +155,9 @@ test("regression: enableRedaction:false still bypasses prefix and step redaction
   });
   const calls = captureConsole("log", () => logger.step("token: RAWSTEP", "work"));
   const output = calls.flat().join(" ");
-  assert.match(output, /RAW/);
-  assert.match(output, /RAWSTEP/);
+  // Assert the PREFIX specifically. A bare /RAW/ was satisfied by "RAWSTEP",
+  // so always-redacting the prefix would have passed this test.
+  assert.match(output, /\[token: RAW\]/, `prefix must stay raw: ${output}`);
+  assert.match(output, /\[Step token: RAWSTEP\]/, `step must stay raw: ${output}`);
+  assert.doesNotMatch(output, /\*\*\*/, "nothing should be masked when redaction is off");
 });

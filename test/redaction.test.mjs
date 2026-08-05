@@ -382,8 +382,13 @@ test("redactValueByKey: a circular object fails closed rather than returning the
   const circular = { self: null, password: "hunter2" };
   circular.self = circular;
   const out = redactValueByKey("payload", circular);
+  // Serialize the clone: String(out) yields "[object Object]" and would pass
+  // even if the credential were sitting in plain sight on the result.
+  const serialized = JSON.stringify(out);
   assert.notEqual(out, circular);
-  assert.doesNotMatch(String(out), /hunter2/);
+  assert.doesNotMatch(serialized, /hunter2/);
+  assert.match(serialized, /"password":"\*\*\*"/);
+  assert.match(serialized, /Circular/);
 });
 
 // ---------------------------------------------------------------------------
@@ -527,6 +532,9 @@ test("redactString: a 9+ digit run is not partially masked", () => {
   // visible — a partial mask that reads as a complete one.
   const out = redactString("code: 1234567890");
   assert.doesNotMatch(out, /\*{6}\d/, `partial mask left digits visible: ${out}`);
+  // Absence of a partial mask is not enough: masking the whole run would also
+  // satisfy it while destroying the diagnostic. Pin that the run survives.
+  assert.match(out, /1234567890/, `9+ digit run must be preserved: ${out}`);
 });
 
 test("redactString: ordinary prose containing the word 'code' is untouched", () => {
@@ -707,16 +715,26 @@ test("regression: credential keys mask EVERY runtime type, not just strings", ()
   // bigint/symbol/function values converted themselves to text and returned
   // before it was reached — contradicting the documented contract.
   function LEAKFN() {}
+  // Every type the walker dispatches on, so a bypass reintroduced for any
+  // single branch (arrays were missing before) fails this test.
   const cases = [
     { token: 12345678901234567890n },
     { token: Symbol("LEAKSYM") },
     { token: LEAKFN },
+    { token: ["ARRAYSECRET"] },
+    { token: { nested: "OBJECTSECRET" } },
+    { token: true },
+    { token: 4242424242 },
     { NPM_TOKEN: 98765432109876543210n },
   ];
   for (const value of cases) {
     const output = JSON.stringify(sanitizeArgs([value]));
-    assert.doesNotMatch(output, /12345678901234567890|LEAKSYM|LEAKFN|98765432109876543210/, output);
-    assert.match(output, /\*\*\*/);
+    assert.doesNotMatch(
+      output,
+      /12345678901234567890|LEAKSYM|LEAKFN|ARRAYSECRET|OBJECTSECRET|98765432109876543210|4242424242/,
+      output,
+    );
+    assert.match(output, /\*\*\*/, `mask marker missing: ${output}`);
   }
 });
 
@@ -735,6 +753,11 @@ test("regression: hostile built-in overrides cannot emit raw strings", () => {
 
   const output = JSON.stringify(sanitizeArgs([{ d: new HostileDate(), r: hostileRegExp, u: hostileUrl }]));
   assert.doesNotMatch(output, /LEAKDATE|LEAKREGEXP|LEAKURL/, output);
+  // Absence alone would be satisfied by withholding all three. Assert the
+  // intrinsic values still come through, so the diagnostic is not lost.
+  assert.match(output, /\d{4}-\d{2}-\d{2}T/, `Date lost its value: ${output}`);
+  assert.match(output, /\/x\//, `RegExp lost its value: ${output}`);
+  assert.match(output, /example\.test/, `URL lost its value: ${output}`);
 });
 
 test("regression: toJSON is never INVOKED, not merely ignored", () => {
@@ -756,21 +779,53 @@ test("regression: toJSON is never INVOKED, not merely ignored", () => {
 });
 
 test("regression: percent-encoded nested URLs cannot hide a credential", () => {
-  const input = "https://example.test/?redirect=https%3A%2F%2Fidp.test%2Fcb%3Faccess_token%3DLEAKENC";
-  const output = redactString(input);
-  assert.doesNotMatch(output, /LEAKENC/, output);
+  const encode = (text, layers) => {
+    let out = text;
+    for (let i = 0; i < layers; i++) out = encodeURIComponent(out);
+    return out;
+  };
+  // Multiple layers: a fixed 3-round decode bound previously let 4 layers through.
+  for (const layers of [1, 2, 3, 4, 5, 6]) {
+    const input = `https://example.test/?redirect=${encode(`https://idp.test/cb?access_token=LEAKENC${layers}`, layers)}&page=2`;
+    const output = redactString(input);
+    assert.doesNotMatch(output, new RegExp(`LEAKENC${layers}`), `${layers} layers: ${output}`);
+    assert.match(output, /redirect=\*\*\*/, `mask marker missing at ${layers} layers: ${output}`);
+    assert.match(output, /page=2/, `benign sibling lost at ${layers} layers: ${output}`);
+  }
+  // A malformed escape must not disable inspection of the rest.
+  const malformed = redactString(
+    "https://a.test/?redirect=https%3A%2F%2Fidp.test%2Fcb%3Faccess_token%3DDECODEERR%ZZ",
+  );
+  assert.doesNotMatch(malformed, /DECODEERR/, malformed);
 });
 
 test("regression: ubiquitous env credential names are masked", () => {
-  for (const key of ["DB_PASS", "DB_AUTH", "authorizationHeader", "AUTH_TOKEN"]) {
+  // Acronym-prefixed spellings too: `DBPassword` and `NPMToken` were single
+  // segments before camelCase splitting handled an uppercase run.
+  for (const key of ["DB_PASS", "DB_AUTH", "authorizationHeader", "AUTH_TOKEN", "DBPassword", "NPMToken", "HTTPAuthorizationHeader", "tokenValue"]) {
     const output = JSON.stringify(sanitizeArgs([{ [key]: "LEAK123" }]));
     assert.doesNotMatch(output, /LEAK123/, `${key} was not masked`);
+    assert.match(output, /\*\*\*/, `${key} produced no mask marker`);
   }
 });
 
 test("regression: long env-style labels are masked in messages", () => {
-  // The prefix bound was raised from 6 to 12 after a 7-segment label leaked.
+  // There is no prefix-count bound any more: the label matcher accepts any
+  // identifier and isCredentialKey decides. A fixed bound was a hard
+  // false-negative boundary — 7 leaked at {0,6}, 13 leaked at {0,12}.
   assert.doesNotMatch(redactString("FOO_BAR_BAZ_QUX_QUUX_CORGE_GRAULT_TOKEN=LEAKLABEL"), /LEAKLABEL/);
+  assert.doesNotMatch(redactString("A_B_C_D_E_F_G_H_I_J_K_L_M_TOKEN=THIRTEEN"), /THIRTEEN/);
+
+  // The one remaining limit is a 128-CHARACTER cap on the identifier itself,
+  // which exists to keep the matcher linear (see CREDENTIAL_LABEL). Assert the
+  // real boundary rather than pretending it does not exist: a long-but-
+  // realistic name masks, and the documented cap is where it stops.
+  const realistic = "GITHUB_ENTERPRISE_SERVER_OAUTH_APP_CLIENT_ACCESS_TOKEN";
+  assert.ok(realistic.length < 128);
+  assert.doesNotMatch(redactString(`${realistic}=REALISTIC`), /REALISTIC/);
+  // The message and structured paths must agree on what is NOT a credential.
+  assert.match(redactString("cache_key=PLAINVALUE"), /cache_key=PLAINVALUE/);
+  assert.match(JSON.stringify(sanitizeArgs([{ cache_key: "PLAINVALUE" }])), /PLAINVALUE/);
 });
 
 test("regression: a __proto__ key cannot reparent the returned object", () => {
@@ -781,12 +836,16 @@ test("regression: a __proto__ key cannot reparent the returned object", () => {
   const prototype = Object.getPrototypeOf(result);
   assert.notEqual(prototype?.inherited, "LEAKPROTO");
   assert.equal({}.inherited, undefined, "global Object.prototype must be clean");
+  // defineEntry must create a real OWN property, not silently drop the key —
+  // skipping __proto__ entirely would also avoid reparenting but lose data.
+  assert.ok(Object.prototype.hasOwnProperty.call(result, "__proto__"), "__proto__ must become an own property");
+  assert.match(JSON.stringify(result), /"ok":1/);
 });
 
 test("regression: an Error with very many own properties is bounded", () => {
   const error = new Error("boom");
   for (let index = 0; index < 1000; index++) error[`prop${index}`] = index;
   const result = sanitizeArgs([error])[0];
-  assert.ok(Object.keys(result).length <= 205, `unbounded error walk: ${Object.keys(result).length}`);
+  assert.ok(Object.keys(result).length <= 204, `unbounded error walk: ${Object.keys(result).length}`);
   assert.match(JSON.stringify(result), /boom/);
 });

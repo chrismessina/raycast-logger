@@ -40,7 +40,11 @@ what is printed for hostile or unserializable values — see *Behavior changes*.
 - Stop masking symbolic `error.code` values such as `ENOENT` and `ECONNREFUSED`. Only 4–8 digit numeric codes are treated as 2FA codes, so the most diagnostic field of an error object is readable again.
 - Require a whole-word 2FA label, so `decode`, `barcode`, and `encoded` no longer mask unrelated numbers.
 - Recognize the underscore spelling `two_factor:` in messages, matching the already-supported `two-factor` and `two factor` forms.
-- Bound the credential matcher's environment-prefix group to 12 segments. A long delimiter chain (`"a-".repeat(30000)` before a credential word) previously backtracked for ~2.5 seconds; it now completes in ~7ms.
+- Decide message-level redaction with the same `isCredentialKey` rule the structured path uses, instead of a parallel hardcoded alternation. The two disagreed in both directions: `tokenValue=x` and `authorizationHeader=x` masked as object keys but leaked in messages, while `cache_key=x` masked in messages but stayed readable as an object key. This also removes the prefix-count boundary entirely — 7 segments leaked at the first bound, 13 at the second.
+- Recurse into non-credential assignment values. `Error: token=secret` matched label `Error`, whose value swallowed the nested credential — the exact shape of a stack trace's first line, so thrown errors leaked.
+- Split acronym boundaries when segmenting keys, so `DBPassword`, `NPMToken`, and `HTTPAuthorizationHeader` are recognized rather than treated as single words.
+- Decode nested URL parameters up to 8 rounds and scan every intermediate form, and continue past a malformed escape instead of abandoning inspection. A 4-layer encoded value and a single stray `%ZZ` each defeated the previous logic.
+- Cap the message-level key matcher at 128 characters. A long delimiter chain (`"a-".repeat(30000)`) backtracked for ~2.5s originally and ~4.7s after the matcher was made permissive; it now completes in ~50ms.
 - Stop partially masking a 9+ digit run, which previously left trailing digits visible and read as a full mask.
 - Preserve useful `Error` diagnostics — `name`, `message`, `stack`, `cause`, `errors`, and own enumerable properties — while redacting secrets from them.
 
@@ -56,7 +60,7 @@ what is printed for hostile or unserializable values — see *Behavior changes*.
 
 ### Added
 
-- Regression tests for redaction rules and failure paths (104 cases), including one per confirmed leak found across two rounds of adversarial review.
+- Regression tests for redaction rules and failure paths (105 cases), including one per confirmed leak found across three rounds of adversarial review, verified by mutation testing.
 - CI on Node 22 and 24 with audit and pack validation, release-tag verification, npm provenance, and a private vulnerability-reporting policy.
 
 ### Documentation

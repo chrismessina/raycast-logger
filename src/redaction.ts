@@ -110,11 +110,19 @@ function normalizeKey(key: string): string {
  * `myApiKeyValue` -> ["my", "api", "key", "value"].
  */
 function keySegments(key: string): string[] {
-  return key
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .split(/[\s_-]+/)
-    .filter(Boolean)
-    .map((segment) => segment.toLowerCase());
+  return (
+    key
+      // `dbPassword` -> `db Password`
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      // `DBPassword` -> `DB Password`, `HTTPAuthorizationHeader` -> `HTTP Authorization Header`.
+      // Without this an ACRONYM prefix stayed glued to the head noun, so
+      // `DBPassword` and `NPMToken` were single segments and never matched.
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+      // `.` splits too, so a dotted path like `config.token` is segmented.
+      .split(/[\s_.-]+/)
+      .filter(Boolean)
+      .map((segment) => segment.toLowerCase())
+  );
 }
 
 function isCredentialKey(key: string): boolean {
@@ -137,27 +145,37 @@ function isCredentialKey(key: string): boolean {
 }
 
 /**
- * Credential label used by the message-level rules, written once so the quoted
- * and unquoted variants cannot drift apart.
+ * Label matcher for the message-level rules: ANY identifier-shaped key.
  *
- * `(?:[A-Za-z0-9]+[_-]){0,12}` allows an environment-style prefix, so
- * `NPM_TOKEN=x` and `GITHUB_ACCESS_TOKEN: x` are recognized. `\b` alone could
- * not do this: `_` is a word character, so there is no boundary between `NPM_`
- * and `TOKEN`.
+ * This is deliberately permissive, because the decision of whether a key is
+ * sensitive belongs to `isCredentialKey()` — the SAME function the structured
+ * path uses. An earlier version hardcoded a large alternation of credential
+ * words here, which guaranteed the two public paths would disagree, and they
+ * did in both directions:
  *
- * The bound is load-bearing, not cosmetic. Unbounded (`*`), a long delimiter
- * chain that never reaches a credential word — `"a-".repeat(30000)` followed by
- * `secret=x` — backtracked for ~2.5 SECONDS, because every start position could
- * consume an arbitrary run before failing. A fixed bound makes the work per
- * start position constant; cost then grows linearly in the bound, measured at
- * ~2ms for 6 and ~3ms for 12 on that same hostile input. Twelve is far above
- * any realistic environment variable name while staying cheap.
+ *   - `tokenValue=x` and `authorizationHeader=x` masked as object keys but
+ *     leaked in messages, because the alternation only recognized
+ *     delimiter-separated labels.
+ *   - `cache_key=x` masked in messages but stayed readable as an object key,
+ *     because the alternation listed bare `key` while the compound-key policy
+ *     deliberately excludes it.
  *
- * The trailing `\b` still protects `tokenizer`, which has no boundary between
- * `token` and `izer`.
+ * Matching every identifier and deferring the policy to one function makes
+ * those disagreements structurally impossible. It also removes the bounded
+ * prefix group entirely, and with it both the ReDoS surface that group created
+ * and the hard false-negative boundary at its repetition limit.
+ *
+ * `tokenizer` is still safe: the whole identifier is tested, and
+ * `isCredentialKey("tokenizer")` is false.
  */
-const CREDENTIAL_LABEL =
-  "(?:[A-Za-z0-9]+[_-]){0,12}(?:password|pass|pwd|secret|token|auth|authorization|key|api[_-]?key|access[_-]?token|api[_-]?token|client[_-]?secret|refresh[_-]?token|id[_-]?token|oauth[_-]?token|private[_-]?key|signing[_-]?key|apple[_-]?password|credentials?)";
+/*
+ * Length-bounded on purpose. Unbounded, `-` inside the class made
+ * `"a-".repeat(30000)` a single enormous identifier that backtracked through
+ * every split looking for a following `:`/`=` — 4.7 SECONDS on that input.
+ * A 128-character cap makes the work per starting position constant; no real
+ * key name comes close.
+ */
+const CREDENTIAL_LABEL = "[A-Za-z_][A-Za-z0-9_.-]{0,127}";
 
 /*
  * Both patterns below are module-level `g`-flagged RegExp objects reused across
@@ -174,44 +192,100 @@ const CREDENTIAL_LABEL =
 
 /** `key: "quoted value"` — masks inside the quotes, preserving the quoting. */
 const QUOTED_CREDENTIAL_ASSIGNMENT = new RegExp(
-  `(["']?)\\b(${CREDENTIAL_LABEL})\\b\\1(\\s*[:=]\\s*)(["'])(?:\\\\.|(?!\\4)[^\\\\\\r\\n])*\\4`,
+  `(["']?)\\b(${CREDENTIAL_LABEL})\\b\\1(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\4)[^\\\\\\r\\n])*)\\4`,
   "gi",
 );
 
 /** `key=bare-value` — masks to the next delimiter. */
 const BARE_CREDENTIAL_ASSIGNMENT = new RegExp(
-  `(["']?)\\b(${CREDENTIAL_LABEL})\\b\\1(\\s*[:=]\\s*)[^\\s&,;"')\\]}]+`,
+  `(["']?)\\b(${CREDENTIAL_LABEL})\\b\\1(\\s*[:=]\\s*)([^\\s&,;"')\\]}]+)`,
   "gi",
 );
+
+/**
+ * Mask `key = value` pairs whose key is a credential, leaving every other pair
+ * byte-identical.
+ *
+ * A non-credential pair RECURSES into its own value rather than passing it
+ * through. Matching consumes the value, so without this an innocuous outer
+ * label swallowed a nested credential and hid it completely:
+ *
+ *   "Error: token=secret"
+ *
+ * matched label `Error` with value `token=secret`, and since `Error` is not a
+ * credential the whole thing was returned untouched. That is exactly the shape
+ * of a stack trace's first line, so real thrown errors leaked.
+ */
+function maskCredentialAssignments(text: string, depth = 0): string {
+  if (depth > 4) return text;
+
+  let output = text.replace(
+    QUOTED_CREDENTIAL_ASSIGNMENT,
+    (_match, quote: string, label: string, delimiter: string, valueQuote: string, inner: string) => {
+      const masked = isCredentialKey(label) ? "***" : maskCredentialAssignments(inner, depth + 1);
+      return `${quote}${label}${quote}${delimiter}${valueQuote}${masked}${valueQuote}`;
+    },
+  );
+
+  output = output.replace(
+    BARE_CREDENTIAL_ASSIGNMENT,
+    (_match, quote: string, label: string, delimiter: string, value: string) => {
+      const masked = isCredentialKey(label) ? "***" : maskCredentialAssignments(value, depth + 1);
+      return `${quote}${label}${quote}${delimiter}${masked}`;
+    },
+  );
+
+  return output;
+}
 
 /**
  * Does this percent-encoded parameter value decode to something carrying a
  * credential-named parameter of its own?
  *
- * Decoding is applied repeatedly (bounded) because a value can be encoded more
- * than once; each round is checked before decoding again. The scan is plain
- * string splitting rather than a recursive `redactUrl` call, so there is no
- * mutual recursion and a decoded fragment without a scheme is still inspected.
+ * Decoding is applied repeatedly because a value can be encoded more than once,
+ * and EVERY form is scanned — including the original — so a credential visible
+ * at any layer is caught. The scan is plain string splitting rather than a
+ * recursive `redactUrl` call, so there is no mutual recursion and a decoded
+ * fragment without a scheme is still inspected.
+ *
+ * The round limit is 8 rather than 3: three layers of `encodeURIComponent` is
+ * not a natural boundary, and a four-layer value leaked straight through it.
+ * Each round shrinks the string, so the loop terminates well before the cap in
+ * practice; the cap only bounds pathological input.
  */
+function carriesCredentialParameter(text: string): boolean {
+  for (const pair of text.split(/[?&#;]/)) {
+    const equals = pair.indexOf("=");
+    if (equals <= 0) continue;
+    if (isCredentialKey(pair.slice(0, equals))) return true;
+  }
+  return false;
+}
+
 function decodedCarriesCredential(rawValue: string): boolean {
   let current = rawValue;
-  for (let round = 0; round < 3; round++) {
+  for (let round = 0; round < 8; round++) {
+    if (carriesCredentialParameter(current)) return true;
+
     let decoded: string;
     try {
       decoded = decodeURIComponent(current.replace(/\+/g, " "));
     } catch {
-      return false;
+      // A single malformed escape (`%ZZ`) must not disable inspection of the
+      // rest — that let `...%3Faccess_token%3DSECRET%ZZ` through untouched.
+      // Decode the well-formed escapes individually and keep going.
+      decoded = current.replace(/%[0-9A-Fa-f]{2}/g, (escape) => {
+        try {
+          return decodeURIComponent(escape);
+        } catch {
+          return escape;
+        }
+      });
     }
     if (decoded === current) return false;
-
-    for (const pair of decoded.split(/[?&#;]/)) {
-      const equals = pair.indexOf("=");
-      if (equals <= 0) continue;
-      if (isCredentialKey(pair.slice(0, equals))) return true;
-    }
     current = decoded;
   }
-  return false;
+  return carriesCredentialParameter(current);
 }
 
 /**
@@ -334,8 +408,9 @@ export function redactString(input: string): string {
 
   // Preserve the original key spelling, delimiter, whitespace, and optional
   // quotes so JSON-ish and line-oriented logs remain structurally useful.
-  s = s.replace(QUOTED_CREDENTIAL_ASSIGNMENT, "$1$2$1$3$4***$4");
-  s = s.replace(BARE_CREDENTIAL_ASSIGNMENT, "$1$2$1$3***");
+  // The label pattern matches ANY identifier; isCredentialKey decides, so the
+  // message path and the structured path cannot disagree.
+  s = maskCredentialAssignments(s);
   // Mask a labeled 2FA/OTP code.
   //
   // The label and the digits are allowed to be separated by a few filler words,
