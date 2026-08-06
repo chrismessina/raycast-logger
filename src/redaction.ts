@@ -28,49 +28,16 @@ const TWO_FACTOR_KEYS = new Set(["code", "otp", "2fa", "twofactor", "verificatio
 const IDENTIFIER_KEYS = new Set(["email", "appleid", "username", "user"]);
 
 /**
- * Terms that make a COMPOUND key sensitive when they appear as its final
- * segment, so environment-style names like `NPM_TOKEN`, `GITHUB_TOKEN`, and
- * `DB_PASSWORD` are masked rather than sailing through the exact-match set.
- *
- * `key` and `code` are deliberately excluded: they are heavily overloaded as
- * trailing words, and `cacheKey`, `sortKey`, `partitionKey`, `publicKey`,
- * `statusCode`, and `errorCode` are not secrets. Masking them would destroy
- * exactly the diagnostics this package exists to preserve — the same failure
- * mode as the old blanket `error.code` masking. Both still redact on an exact
- * whole-key match.
- */
-const CREDENTIAL_SUFFIXES = new Set([
-  "password",
-  "passwd",
-  "secret",
-  "token",
-  "apikey",
-  "accesstoken",
-  "apitoken",
-  "refreshtoken",
-  "idtoken",
-  "oauthtoken",
-  "clientsecret",
-  "privatekey",
-  "signingkey",
-  "credential",
-  "credentials",
-  // Head-position only. `DB_PASS` and `DB_AUTH` are ubiquitous environment
-  // names, and leaking one is worse than losing the diagnostic value of a
-  // field like `firstPass` or `boardingPass` that happens to end the same way.
-  // Not in CREDENTIAL_ANYWHERE, so `passThrough` and `authFlow` are untouched.
-  "pass",
-  "pwd",
-  "auth",
-]);
-
-/**
- * Terms sensitive in ANY segment, not just the head.
+ * Terms unambiguous enough to mark a compound key sensitive from ANY segment,
+ * not just its head.
  *
  * `authorizationHeader` holds a credential even though its head noun is
- * `header`; so do `tokenValue` and `secretRef`. Restricted to unambiguous
- * terms — `key`, `pass`, `auth`, `code`, and `value` are excluded, so
- * `apiKeyValue` and `cacheKeyPrefix` keep their diagnostics.
+ * `header`; so do `tokenValue` and `secretRef`. `key`, `code`, and `value` are
+ * excluded because they are heavily overloaded — `cacheKey`, `sortKey`,
+ * `publicKey`, `statusCode`, and `apiKeyValue` are not secrets, and masking
+ * them would destroy exactly the diagnostics this package exists to preserve
+ * (the same failure mode as the old blanket `error.code` masking). They still
+ * redact on an exact whole-key match.
  *
  * The cost is accepted deliberately: `cancellationToken` and
  * `refreshTokenExpiresAt` are masked despite not being secrets. Masking a
@@ -94,6 +61,16 @@ const CREDENTIAL_ANYWHERE = new Set([
   "credentials",
   "authorization",
 ]);
+
+/**
+ * Terms that qualify ONLY as a compound key's head noun.
+ *
+ * `DB_PASS` and `DB_AUTH` are ubiquitous environment names, and leaking one is
+ * worse than losing the diagnostic value of a field like `firstPass` or
+ * `boardingPass` that happens to end the same way. Kept separate from
+ * CREDENTIAL_ANYWHERE so `passThrough` and `authFlow` stay untouched.
+ */
+const CREDENTIAL_HEAD_ONLY = new Set(["pass", "pwd", "auth"]);
 
 /**
  * Treat camelCase, snake_case, kebab-case, and space-separated key spellings
@@ -134,11 +111,14 @@ function isCredentialKey(key: string): boolean {
   // The head is checked as both the final segment and the final TWO segments
   // joined, because the terms themselves are compounds: `MY_API_KEY` splits to
   // ["my","api","key"], whose head is the two-word term "apikey". Checking only
-  // the last segment would miss it, since bare "key" is excluded above.
+  // the last segment would miss it, since bare "key" never qualifies.
   const segments = keySegments(key);
   if (segments.length < 2) return false;
-  if (CREDENTIAL_SUFFIXES.has(segments[segments.length - 1])) return true;
-  if (CREDENTIAL_SUFFIXES.has(segments.slice(-2).join(""))) return true;
+
+  const head = segments[segments.length - 1];
+  const headPair = segments.slice(-2).join("");
+  if (CREDENTIAL_HEAD_ONLY.has(head) || CREDENTIAL_HEAD_ONLY.has(headPair)) return true;
+  if (CREDENTIAL_ANYWHERE.has(headPair)) return true;
   // An unambiguous credential word anywhere in the key, for names whose head
   // noun is a container rather than the secret itself (`authorizationHeader`).
   return segments.some((segment) => CREDENTIAL_ANYWHERE.has(segment));
@@ -167,8 +147,7 @@ function isCredentialKey(key: string): boolean {
  *
  * `tokenizer` is still safe: the whole identifier is tested, and
  * `isCredentialKey("tokenizer")` is false.
- */
-/*
+ *
  * Length-bounded on purpose. Unbounded, `-` inside the class made
  * `"a-".repeat(30000)` a single enormous identifier that backtracked through
  * every split looking for a following `:`/`=` — 4.7 SECONDS on that input.
@@ -238,6 +217,16 @@ function maskCredentialAssignments(text: string, depth = 0): string {
   return output;
 }
 
+/** Does this text contain a `key=value` pair whose key is a credential? */
+function carriesCredentialParameter(text: string): boolean {
+  for (const pair of text.split(/[?&#;]/)) {
+    const equals = pair.indexOf("=");
+    if (equals <= 0) continue;
+    if (isCredentialKey(pair.slice(0, equals))) return true;
+  }
+  return false;
+}
+
 /**
  * Does this percent-encoded parameter value decode to something carrying a
  * credential-named parameter of its own?
@@ -253,15 +242,6 @@ function maskCredentialAssignments(text: string, depth = 0): string {
  * Each round shrinks the string, so the loop terminates well before the cap in
  * practice; the cap only bounds pathological input.
  */
-function carriesCredentialParameter(text: string): boolean {
-  for (const pair of text.split(/[?&#;]/)) {
-    const equals = pair.indexOf("=");
-    if (equals <= 0) continue;
-    if (isCredentialKey(pair.slice(0, equals))) return true;
-  }
-  return false;
-}
-
 function decodedCarriesCredential(rawValue: string): boolean {
   let current = rawValue;
   for (let round = 0; round < 8; round++) {
@@ -449,8 +429,8 @@ export function redactString(input: string): string {
  * Does NOT recurse into objects; lets JSON.stringify handle traversal
  */
 export function redactByKey(key: string, value: unknown): unknown {
-  const k = normalizeKey(key);
   if (value == null) return value;
+  const k = normalizeKey(key);
 
   // Credential keys are sensitive regardless of whether their runtime value
   // happens to be a string, number, bigint, boolean, or nested object.
@@ -539,16 +519,16 @@ function errorToTree(error: Error, seen: WeakSet<object>, depth: number): Record
   const keys = Object.keys(source).filter(
     (property) => property !== "name" && property !== "message" && property !== "stack",
   );
-  const limit = Math.min(keys.length, MAX_OBJECT_ENTRIES);
-  for (let index = 0; index < limit; index++) {
-    const property = keys[index];
+  for (const property of keys.slice(0, MAX_OBJECT_ENTRIES)) {
     defineEntry(
       record,
       property,
       safeTree(property, (source as unknown as Record<string, unknown>)[property], seen, depth + 1),
     );
   }
-  if (keys.length > limit) record["[truncated]"] = `${keys.length - limit} more entries`;
+  if (keys.length > MAX_OBJECT_ENTRIES) {
+    record["[truncated]"] = `${keys.length - MAX_OBJECT_ENTRIES} more entries`;
+  }
   if (source.cause !== undefined) record.cause = safeTree("cause", source.cause, seen, depth + 1);
   if (source.errors !== undefined) record.errors = safeTree("errors", source.errors, seen, depth + 1);
   return record;
