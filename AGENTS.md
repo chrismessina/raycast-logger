@@ -198,6 +198,8 @@ Unlink with `npm unlink @chrismessina/raycast-logger` in the extension and
 | `QUICKSTART.md` | Three-step setup for a consuming extension |
 | `CHANGELOG.md` | Version history — security entries state the *mechanism* |
 | `SECURITY.md` | Private vulnerability reporting |
+| `docs/solutions/` | Documented solutions to past problems, by category with YAML frontmatter (`module`, `tags`, `problem_type`) — relevant when implementing or debugging in a documented area |
+| `CONCEPTS.md` | Shared domain vocabulary (redaction, credential key, emitted vs visible) |
 
 When behavior changes, update `README.md` **and** `CHANGELOG.md` in the same
 change. The README's redaction tables make specific, checkable claims about
