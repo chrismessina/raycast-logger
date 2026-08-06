@@ -95,8 +95,10 @@ function keySegments(key: string): string[] {
       // Without this an ACRONYM prefix stayed glued to the head noun, so
       // `DBPassword` and `NPMToken` were single segments and never matched.
       .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-      // `.` splits too, so a dotted path like `config.token` is segmented.
-      .split(/[\s_.-]+/)
+      // `.` and `+` split too: a dotted path like `config.token`, and a URL
+      // parameter name that arrived as `access+token` (a form-encoded space, or
+      // a decoded `%2B`) which would otherwise stay one unrecognized segment.
+      .split(/[\s_.+-]+/)
       .filter(Boolean)
       .map((segment) => segment.toLowerCase())
   );
@@ -113,7 +115,18 @@ function isCredentialKey(key: string): boolean {
   // ["my","api","key"], whose head is the two-word term "apikey". Checking only
   // the last segment would miss it, since bare "key" never qualifies.
   const segments = keySegments(key);
-  if (segments.length < 2) return false;
+
+  // A key with no delimiters and no case transitions — `DBPASSWORD`, `NPMTOKEN`,
+  // `mysecret` — cannot be segmented, so the head-noun rules below never see it.
+  // Fall back to a suffix test against the unambiguous terms only. `key`,
+  // `pass`, `auth`, and `code` are not in that set, so `monkey`, `bypass`, and
+  // `compass` stay readable; `tokenizer` does not end with a term at all.
+  if (segments.length < 2) {
+    const normalized = normalizeKey(key);
+    return [...CREDENTIAL_ANYWHERE].some(
+      (term) => normalized.length > term.length && normalized.endsWith(term),
+    );
+  }
 
   const head = segments[segments.length - 1];
   const headPair = segments.slice(-2).join("");
@@ -148,13 +161,28 @@ function isCredentialKey(key: string): boolean {
  * `tokenizer` is still safe: the whole identifier is tested, and
  * `isCredentialKey("tokenizer")` is false.
  *
- * Length-bounded on purpose. Unbounded, `-` inside the class made
- * `"a-".repeat(30000)` a single enormous identifier that backtracked through
- * every split looking for a following `:`/`=` — 4.7 SECONDS on that input.
- * A 128-character cap makes the work per starting position constant; no real
- * key name comes close.
+ * `(?=(X))\N` is the JavaScript idiom for an ATOMIC group: the lookahead
+ * matches X, and the backreference re-consumes exactly what it captured, so the
+ * engine cannot backtrack into a shorter identifier. That matters because `-`
+ * is in the character class — without it, `"a-".repeat(30000)` became one
+ * enormous identifier that the engine re-split at every position hunting for a
+ * following `:`/`=`, taking seconds.
+ *
+ * The `{0,511}` bound is a SEPARATE concern from backtracking, and it is not
+ * free to remove. The atomic lookahead captures at every starting position, so
+ * on input where the pattern fails everywhere — a long delimiter chain with no
+ * quoted assignment — an uncapped capture costs O(n) per position and took
+ * ~1.0 SECONDS on a 60 KB string. Capping the capture makes that per-position
+ * cost constant: 37ms at 512, 7ms at 128.
+ *
+ * KNOWN LIMITATION: a credential key longer than 512 characters is masked in
+ * structured data (which has no length limit) but not in a message string.
+ * That boundary is deliberate and documented rather than removed, because the
+ * alternative is a one-second CPU cost on adversarial input. No real key name
+ * approaches 512 characters; an earlier 128 was tight enough to be worth
+ * raising, and this is not.
  */
-const CREDENTIAL_LABEL = "[A-Za-z_][A-Za-z0-9_.-]{0,127}";
+const CREDENTIAL_LABEL = "[A-Za-z_](?=([A-Za-z0-9_.-]{0,511}))\\3";
 
 /*
  * Both patterns below are module-level `g`-flagged RegExp objects reused across
@@ -169,9 +197,17 @@ const CREDENTIAL_LABEL = "[A-Za-z_][A-Za-z0-9_.-]{0,127}";
  * `lastIndex` explicitly or build a local copy at the call site.
  */
 
+/*
+ * Group numbering for both patterns (group 3 is the atomic lookahead inside
+ * CREDENTIAL_LABEL and is never read):
+ *   1 = optional surrounding quote   2 = label   4 = delimiter
+ *   QUOTED additionally: 5 = value quote, 6 = inner value
+ *   BARE additionally:   5 = value
+ */
+
 /** `key: "quoted value"` — masks inside the quotes, preserving the quoting. */
 const QUOTED_CREDENTIAL_ASSIGNMENT = new RegExp(
-  `(["']?)\\b(${CREDENTIAL_LABEL})\\b\\1(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\4)[^\\\\\\r\\n])*)\\4`,
+  `(["']?)\\b(${CREDENTIAL_LABEL})\\b\\1(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\5)[^\\\\\\r\\n])*)\\5`,
   "gi",
 );
 
@@ -196,11 +232,24 @@ const BARE_CREDENTIAL_ASSIGNMENT = new RegExp(
  * of a stack trace's first line, so real thrown errors leaked.
  */
 function maskCredentialAssignments(text: string, depth = 0): string {
-  if (depth > 4) return text;
+  // Each level strips one `key=` from the front of a chained assignment, so the
+  // depth needed equals the nesting of `=`. A bound of 4 let
+  // `a=b=c=d=e=token=SECRET` through: five innocuous labels exhausted the
+  // budget before the credential was reached. 24 is far past any real log line,
+  // and every level operates on a strictly shorter string.
+  if (depth > 24) return text;
 
   let output = text.replace(
     QUOTED_CREDENTIAL_ASSIGNMENT,
-    (_match, quote: string, label: string, delimiter: string, valueQuote: string, inner: string) => {
+    (
+      _match,
+      quote: string,
+      label: string,
+      _atomic: string,
+      delimiter: string,
+      valueQuote: string,
+      inner: string,
+    ) => {
       const masked = isCredentialKey(label) ? "***" : maskCredentialAssignments(inner, depth + 1);
       return `${quote}${label}${quote}${delimiter}${valueQuote}${masked}${valueQuote}`;
     },
@@ -208,7 +257,7 @@ function maskCredentialAssignments(text: string, depth = 0): string {
 
   output = output.replace(
     BARE_CREDENTIAL_ASSIGNMENT,
-    (_match, quote: string, label: string, delimiter: string, value: string) => {
+    (_match, quote: string, label: string, _atomic: string, delimiter: string, value: string) => {
       const masked = isCredentialKey(label) ? "***" : maskCredentialAssignments(value, depth + 1);
       return `${quote}${label}${quote}${delimiter}${masked}`;
     },
@@ -237,14 +286,15 @@ function carriesCredentialParameter(text: string): boolean {
  * recursive `redactUrl` call, so there is no mutual recursion and a decoded
  * fragment without a scheme is still inspected.
  *
- * The round limit is 8 rather than 3: three layers of `encodeURIComponent` is
- * not a natural boundary, and a four-layer value leaked straight through it.
- * Each round shrinks the string, so the loop terminates well before the cap in
- * practice; the cap only bounds pathological input.
+ * There is no natural number of encoding layers, so the cap is a safety net
+ * rather than a policy: the loop already exits as soon as decoding stops
+ * changing the string, and each round is strictly shorter than the last.
+ * Successive limits of 3 and 8 were both defeated by simply adding a layer, so
+ * the cap is set high enough that reaching it is pathological, not adversarial.
  */
 function decodedCarriesCredential(rawValue: string): boolean {
   let current = rawValue;
-  for (let round = 0; round < 8; round++) {
+  for (let round = 0; round < 32; round++) {
     if (carriesCredentialParameter(current)) return true;
 
     let decoded: string;

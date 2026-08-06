@@ -44,7 +44,11 @@ what is printed for hostile or unserializable values — see *Behavior changes*.
 - Recurse into non-credential assignment values. `Error: token=secret` matched label `Error`, whose value swallowed the nested credential — the exact shape of a stack trace's first line, so thrown errors leaked.
 - Split acronym boundaries when segmenting keys, so `DBPassword`, `NPMToken`, and `HTTPAuthorizationHeader` are recognized rather than treated as single words.
 - Decode nested URL parameters up to 8 rounds and scan every intermediate form, and continue past a malformed escape instead of abandoning inspection. A 4-layer encoded value and a single stray `%ZZ` each defeated the previous logic.
-- Cap the message-level key matcher at 128 characters. A long delimiter chain (`"a-".repeat(30000)`) backtracked for ~2.5s originally and ~4.7s after the matcher was made permissive; it now completes in ~50ms.
+- Match the message-level key with an atomic group (`(?=(X))\\N`) so the engine cannot backtrack into shorter identifiers, and cap the capture at 512 characters. A long delimiter chain (`"a-".repeat(30000)`) backtracked for ~2.5s originally and ~4.7s after the matcher was made permissive; it now completes in ~55ms. The cap exists for the failure case — an uncapped atomic capture costs O(n) at every starting position and took ~1.0s on the same input.
+- Raise the assignment-recursion depth from 4 to 24. A chain of innocuous labels (`a=b=c=d=e=token=SECRET`) exhausted the budget before reaching the credential.
+- Classify all-uppercase concatenated keys (`DBPASSWORD`, `NPMTOKEN`) by suffix when they cannot be segmented. The fallback uses only unambiguous terms, so `monkey`, `bypass`, and `compass` stay readable.
+- Treat `+` as a key separator, so a parameter named `access+token` (or a decoded `%2B`) is segmented rather than read as one unrecognized word.
+- Raise the nested-URL decode cap from 8 to 32 rounds. Limits of 3 and then 8 were each defeated by adding one more encoding layer; the loop already exits when decoding stops changing the string, so the cap only bounds pathological input.
 - Stop partially masking a 9+ digit run, which previously left trailing digits visible and read as a full mask.
 - Preserve useful `Error` diagnostics — `name`, `message`, `stack`, `cause`, `errors`, and own enumerable properties — while redacting secrets from them.
 
@@ -60,7 +64,7 @@ what is printed for hostile or unserializable values — see *Behavior changes*.
 
 ### Added
 
-- Regression tests for redaction rules and failure paths (105 cases), including one per confirmed leak found across three rounds of adversarial review, verified by mutation testing.
+- Regression tests for redaction rules and failure paths (110 cases), including one per confirmed leak found across four rounds of adversarial review, verified by mutation testing.
 - CI on Node 22 and 24 with audit and pack validation, release-tag verification, npm provenance, and a private vulnerability-reporting policy.
 
 ### Documentation

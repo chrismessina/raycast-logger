@@ -849,3 +849,71 @@ test("regression: an Error with very many own properties is bounded", () => {
   assert.ok(Object.keys(result).length <= 204, `unbounded error walk: ${Object.keys(result).length}`);
   assert.match(JSON.stringify(result), /boom/);
 });
+
+// ---------------------------------------------------------------------------
+// Fourth review round (2026-08-04).
+// ---------------------------------------------------------------------------
+
+test("regression: a chain of innocuous assignments cannot exhaust the recursion budget", () => {
+  // A depth bound of 4 let five innocuous labels consume the budget before the
+  // credential was reached.
+  assert.doesNotMatch(redactString("a=b=c=d=e=token=DEPTHSECRET"), /DEPTHSECRET/);
+  assert.doesNotMatch(redactString("a=b=c=d=e=f=g=h=i=j=token=DEEPER"), /DEEPER/);
+  // Binds the bound itself: at depth 20 the credential must still be found.
+  const chain = Array.from({ length: 20 }, (_, i) => `k${i}=`).join("");
+  assert.doesNotMatch(redactString(`${chain}token=DEEPEST`), /DEEPEST/);
+  // And the innocuous labels must survive rather than being blanket-masked.
+  assert.match(redactString("a=b=c=token=X"), /a=b=c=/);
+});
+
+test("regression: all-uppercase concatenated keys are recognized", () => {
+  // `DBPASSWORD` has no delimiter and no case transition, so segmentation
+  // produced one unmatchable token.
+  for (const key of ["DBPASSWORD", "NPMTOKEN", "MYSECRET", "APITOKEN"]) {
+    assert.doesNotMatch(JSON.stringify(sanitizeArgs([{ [key]: "UPPERLEAK" }])), /UPPERLEAK/, key);
+    assert.doesNotMatch(redactString(`${key}=UPPERLEAK`), /UPPERLEAK/, `${key} in message`);
+  }
+  // The suffix fallback uses only unambiguous terms, so ordinary words that
+  // merely end in `key`/`pass` are untouched.
+  for (const key of ["monkey", "bypass", "compass", "harness", "witness"]) {
+    assert.match(JSON.stringify(sanitizeArgs([{ [key]: "PLAINVALUE" }])), /PLAINVALUE/, key);
+  }
+});
+
+test("regression: plus-separated parameter names are segmented", () => {
+  // `%2B` decodes to `+`, which was not a segment separator, so `access+token`
+  // stayed one unrecognized word.
+  assert.doesNotMatch(redactString("https://a.test/?access%2Btoken=PLUSLEAK"), /PLUSLEAK/);
+  assert.doesNotMatch(JSON.stringify(sanitizeArgs([{ "access+token": "PLUSLEAK" }])), /PLUSLEAK/);
+});
+
+test("regression: deep percent-encoding cannot outrun the decoder", () => {
+  // Limits of 3 and then 8 were each defeated by adding one more layer.
+  const encode = (text, layers) => {
+    let out = text;
+    for (let i = 0; i < layers; i++) out = encodeURIComponent(out);
+    return out;
+  };
+  for (const layers of [9, 12, 20, 30]) {
+    const input = `https://example.test/?redirect=${encode(`https://idp.test/cb?access_token=DEEP${layers}`, layers)}`;
+    assert.doesNotMatch(redactString(input), new RegExp(`DEEP${layers}`), `${layers} layers`);
+  }
+});
+
+test("regression: the message label matcher handles long keys and stays linear", () => {
+  // The cap was 128, which made a 129-character key mask as an object key and
+  // leak in a message. It is now 512 — see CREDENTIAL_LABEL for why a bound
+  // still exists at all.
+  for (const length of [130, 200, 400, 500]) {
+    const key = `${"A".repeat(length - 6)}_TOKEN`;
+    assert.doesNotMatch(redactString(`${key}=LONGLEAK`), /LONGLEAK/, `${length}-char key`);
+  }
+  // Both hostile shapes: the bare matcher succeeds early, the quoted matcher
+  // fails at every position, which is the expensive case.
+  for (const hostile of ["a-".repeat(30000) + "secret=x", "a-".repeat(30000) + 'secret="x"']) {
+    const started = process.hrtime.bigint();
+    redactString(hostile);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(elapsedMs < 1000, `label matcher took ${elapsedMs.toFixed(0)}ms`);
+  }
+});
