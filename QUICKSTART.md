@@ -41,7 +41,7 @@ import { logger } from "@chrismessina/raycast-logger";
 logger.log("Processing request", { userId: 123 });
 logger.debug("Cache state", { hits: 42 });
 
-// Always shown
+// Emitted regardless of the verbose preference
 logger.error("Failed to authenticate", error);
 logger.warn("Rate limit approaching", { remaining: 10 });
 logger.info("Extension initialized");
@@ -50,6 +50,12 @@ logger.info("Extension initialized");
 ## That's it! 🎉
 
 Enable "Verbose Logging" in your extension preferences and check the console for colorized logs.
+
+> **Emitted is not the same as visible.** Raycast disables console logging for
+> extensions installed from the Store, so all of these are visible during
+> development (`ray develop`) but not to end users. Use them for developer
+> diagnostics, and surface anything a user must act on through a Toast or an
+> error view instead.
 
 ---
 
@@ -110,4 +116,5 @@ export interface ExtensionPreferences extends LoggerPreferences {
 
 - Read [README.md](./README.md) for full API documentation and examples
 - Check [CHANGELOG.md](./CHANGELOG.md) for version history
-- View [WARP.md](./WARP.md) for development guidance
+- Report vulnerabilities privately via [SECURITY.md](./SECURITY.md)
+- See [AGENTS.md](./AGENTS.md) for contributor and AI-agent development guidance

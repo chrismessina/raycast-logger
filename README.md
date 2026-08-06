@@ -313,7 +313,7 @@ Key matching is **case-insensitive** and treats camelCase, snake_case, kebab-cas
 
 Matching works on three rules, in order: an exact whole-key match; the **head noun** (final segment, or final two joined); or an unambiguous credential word **anywhere** in the key. Segmentation splits on `_`, `-`, `.`, spaces, and camelCase — including acronym boundaries, so `DBPassword` and `NPMToken` segment correctly.
 
-**The same function decides for both paths.** Message-level redaction (`token=...` in a log string) and structured redaction (`{ token: ... }`) consult one shared rule, so they cannot disagree about what counts as a credential. Key names longer than 128 characters are not matched in messages — a deliberate cap that keeps the matcher linear.
+**The same function decides for both paths.** Message-level redaction (`token=...` in a log string) and structured redaction (`{ token: ... }`) consult one shared rule, so they cannot disagree about what counts as a credential. One exception: key names longer than 512 characters are matched in structured data but not in messages — a deliberate cap that keeps the message matcher linear on adversarial input.
 
 The distinction between "head only" and "anywhere" is deliberate. `pass` and `auth` qualify only as a head, so `DB_PASS` masks while `passThrough` and `authFlow` do not. `key` and `code` never qualify as compound terms at all — masking `cacheKey` or `error.code` would destroy exactly the diagnostics this package exists to preserve — though both still mask on an exact whole-key match.
 
