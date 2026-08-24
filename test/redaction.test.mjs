@@ -917,3 +917,76 @@ test("regression: the message label matcher handles long keys and stays linear",
     assert.ok(elapsedMs < 1000, `label matcher took ${elapsedMs.toFixed(0)}ms`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Over-redaction of paths by the base64 heuristic (added 2026-08-13).
+//
+// `/` is both a base64 body character AND the "contains a non-letter" signal,
+// so any unbroken [A-Za-z0-9+/] run >= 20 chars and divisible by 4 was masked.
+// Filesystem paths, REST paths, and Docker image names all hit it.
+// ---------------------------------------------------------------------------
+
+test("regression: REST and filesystem paths are never masked as base64", () => {
+  const untouched = [
+    // Reported in raycast-context7: run `/api/v1/tailwindlabs/tailwindcss` = 32, %4 = 0.
+    "/api/v1/tailwindlabs/tailwindcss.com",
+    // Reported in raycast-karakeep: run `getmeili/meilisearch` = 20, %4 = 0.
+    "getmeili/meilisearch:v1.41.0",
+    // Reported in raycast-karakeep: run `/Users/messina/Developer/Docker/karakeep` = 40, %4 = 0.
+    "/Users/messina/Developer/Docker/karakeep-app/docker-compose.yml",
+    // Shapes whose runs happen not to be %4 == 0 — regression guards, so a
+    // future change to the length rule cannot quietly start masking them.
+    "/Users/me/Developer/Docker/proj-app/docker-compose.yml",
+    "/api/v1/lists/{nanoid}/bookmarks?limit=10",
+    "ghcr.io/org/app:release",
+    "/api/v1/lists",
+    "/api/v1/tags",
+  ];
+  for (const input of untouched) {
+    assert.equal(redactString(input), input, `path was mangled: ${input}`);
+  }
+});
+
+test("regression: path masking does not depend on run length mod 4", () => {
+  // The mod-4 dependency is the whole bug: two paths differing only by ID
+  // length behaved differently. Sweep the boundary rather than testing one.
+  for (const runLength of [19, 20, 21, 23, 24, 25, 27, 28, 31, 32, 36, 40]) {
+    const path = `/api/v1/${"a".repeat(runLength - 8)}`;
+    assert.equal(path.length, runLength);
+    assert.equal(redactString(path), path, `run length ${runLength} (mod 4 = ${runLength % 4}) was mangled`);
+  }
+});
+
+test("regression: narrowing the base64 pass still masks slashless base64", () => {
+  // The counterweight. Excluding `/`-bearing candidates must not disarm the
+  // pass for ordinary base64 tokens, which carry no slash the vast majority
+  // of the time.
+  // Padded AND unpadded: an `endsWith("=")` condition in the predicate would
+  // keep a padded-only test green while reopening every unpadded token.
+  const padded = "QUJDREVGR0hJSktMTU5PUFFSU1Q=";
+  const unpadded = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY";
+  // Mixed-case with digits, no slash, no padding — the commonest real shape.
+  const bareToken = "aGVsbG8Xd29ybGQ5c2VjcmV0dmFsdWUxMjM0";
+  for (const secret of [padded, unpadded, bareToken]) {
+    assert.doesNotMatch(redactString(`blob ${secret}`), new RegExp(secret), `unmasked: ${secret}`);
+  }
+  assert.doesNotMatch(redactString("hash 0123456789abcdef0123456789abcdef"), /0123456789abcdef/);
+});
+
+test("regression: slash-bearing base64 secrets are still masked", () => {
+  // Excluding every `/`-bearing candidate from the base64 pass was too broad:
+  // standard-alphabet base64 contains `/` about 40% of the time, and these
+  // three shapes are not protected by any earlier pass.
+  const cases = [
+    // `Authorization:` is matched by the label rule, but its value stops at the
+    // first whitespace (`Basic`), so the credential itself relied on this pass.
+    ["Authorization: Basic YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4/+7dzLuq", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"],
+    // AWS's own documented secret-access-key example.
+    ["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI"],
+    // A PEM body line logged on its own.
+    ["YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4/+7dzLuq", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"],
+  ];
+  for (const [input, secret] of cases) {
+    assert.doesNotMatch(redactString(input), new RegExp(secret), `secret survived: ${input}`);
+  }
+});

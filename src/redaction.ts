@@ -378,6 +378,24 @@ function redactUrl(input: string): string {
   );
 }
 
+/**
+ * Does this base64-candidate run look like a path rather than an encoded value?
+ *
+ * Two signals, both cheap and both rare in real base64:
+ *  - it starts with `/` — an absolute filesystem or REST path;
+ *  - a slash-delimited segment of four or more characters is entirely
+ *    lowercase letters (`getmeili`, `bookmarks`, `karakeep`). Random base64
+ *    hits an all-lowercase run of four at roughly (26/64)^4, so this
+ *    misclassifies a genuine secret about 1.7% of the time versus the ~40-63%
+ *    of secrets that a bare "contains a slash" test would have released.
+ */
+function looksLikePath(candidate: string): boolean {
+  return (
+    candidate.startsWith("/") ||
+    candidate.split("/").some((segment) => segment.length >= 4 && /^[a-z]+$/.test(segment))
+  );
+}
+
 function redactLikelyEncodedSecrets(input: string): string {
   // A pure digit run is usually an identifier, not hex. Requiring both a digit
   // and an A-F character keeps hashes covered without destroying long IDs.
@@ -388,12 +406,31 @@ function redactLikelyEncodedSecrets(input: string): string {
 
   // It is impossible to distinguish an unpadded, letters-only base64 value
   // from an ordinary word. Restrict the heuristic to valid four-character
-  // blocks with at least one base64 signal (digit, +, /, or padding) and at
+  // blocks with at least one base64 signal (digit, +, or padding) and at
   // least one letter. Key- and label-based rules still mask ambiguous tokens.
+  //
+  // `/` is both a base64 body character and — before this guard — counted as
+  // the "has a non-letter" signal, so any unbroken run of path characters at
+  // least 20 long and divisible by four was masked: REST paths, filesystem
+  // paths, and Docker image names all disappeared into `***`. Whether a path
+  // was masked depended on its length mod 4, which is why it looked random.
+  //
+  // Skipping every `/`-bearing candidate fixes the paths but is far too broad:
+  // standard-alphabet base64 contains a literal `/` roughly 40% of the time
+  // (63% at PEM line length), so it silently unmasked AWS secret access keys,
+  // `Authorization: Basic <b64>` values, and PEM bodies — none of which any
+  // earlier pass covers. `Authorization:` in particular looks protected but is
+  // not: the label rule stops its value at the first whitespace (`Basic`).
+  //
+  // So discriminate on PATH SHAPE rather than on the mere presence of a slash.
+  // Dropping `/` from the signal test alone would not work either — `/api/v1/…`
+  // still carries the digit in `v1`.
   output = output.replace(
     /(?<![A-Za-z0-9+/=])(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])/g,
     (candidate) =>
-      /[A-Za-z]/.test(candidate) && /[0-9+/=]/.test(candidate) ? "***" : candidate,
+      !looksLikePath(candidate) && /[A-Za-z]/.test(candidate) && /[0-9+/=]/.test(candidate)
+        ? "***"
+        : candidate,
   );
 
   return output;

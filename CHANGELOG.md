@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-13
+
+Raycast API 2.0 support, and a fix for redaction eating REST paths.
+
+### Added
+
+- Support `@raycast/api` 2.x. The peer range widens from `^1.0.0` to
+  `^1.0.0 || ^2.0.0`; no code change was required, because the only API this
+  package imports (`getPreferenceValues`) is unchanged in 2.0. Verified by
+  building and running the full suite against `@raycast/api@2.0.5`.
+
+### Fixed
+
+- Stop masking filesystem paths, REST paths, and Docker image names as base64.
+  `/` was both a base64 body character and the "contains a non-letter" signal in
+  the encoded-secret heuristic, so any unbroken `[A-Za-z0-9+/]` run of at least
+  20 characters and divisible by four became `***`. Whether a path was masked
+  depended on its length mod 4, which is why it looked arbitrary:
+  `/api/v1/tailwindlabs/tailwindcss.com` logged as `***.com`,
+  `getmeili/meilisearch:v1.41.0` as `***:v1.41.0`, and a Docker compose path as
+  `***-app/docker-compose.yml`.
+
+  The heuristic now skips candidates that look like a *path* — a leading `/`, or
+  a slash-delimited segment of four or more all-lowercase letters — rather than
+  skipping every candidate containing a slash. Skipping on the slash alone was
+  the obvious fix and was wrong: standard-alphabet base64 contains a literal `/`
+  roughly 40% of the time (63% at PEM line length), which silently unmasked AWS
+  secret access keys, `Authorization: Basic <base64>` values, and PEM bodies.
+
+### Behavior changes
+
+- Paths that 1.3.0 masked are now logged in full. That is the point of the fix,
+  but it is a visible difference in existing logs.
+- Roughly 1.7% of random standard-base64 secrets are kept when logged with **no**
+  credential key, no `bearer` prefix, and not under a credential-named structured
+  field — the cost of the path discriminator. Any credential context still masks
+  them. Down from ~40-63% under a slash-only rule.
+
+
 ## [1.3.0] - 2026-08-03
 
 Redaction hardening and the first regression suite. No API was added or removed;
