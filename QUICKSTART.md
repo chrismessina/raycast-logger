@@ -30,6 +30,10 @@ In your extension's `package.json`, add the preference:
 }
 ```
 
+Optional: add a second checkbox named `strictRedaction` so users can also hide every
+URL query string and fragment before sharing a log. The block to paste and the exact
+behavior are in the README under *Strict Redaction*.
+
 ## Step 3: Use the Logger
 
 Import and use the logger in your extension:

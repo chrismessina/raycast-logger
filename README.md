@@ -103,6 +103,74 @@ logger.log("Auth attempt", {
 });
 ```
 
+### Strict Redaction
+
+Standard redaction is keyed on *names* — `password`, `token`, `?access_token=`. It
+cannot see a sensitive value under an unremarkable name: `?sid=…`, `?u=…`, a document
+id in a query string. Strict redaction is the blunt answer for that case: every URL
+**query string and fragment** is replaced by a marker, on top of everything standard
+does.
+
+```typescript
+logger.log("GET https://api.example.com/v1/items/abc123?page=2&sid=SECRET");
+// standard -> GET https://api.example.com/v1/items/abc123?page=2&sid=SECRET
+// strict   -> GET https://api.example.com/v1/items/abc123?***
+```
+
+It is **off by default**, because a query string is often the thing being diagnosed.
+A debug log that omits the input is not a safer log; it is a useless one. The right
+moment to raise the floor is when a log is about to leave the machine — pasted into
+an issue, sent to a maintainer — and the person who knows that is the user, not the
+extension author. So it is exposed as a **user preference**. Add it to your
+`package.json` next to `verboseLogging`:
+
+```json
+{
+  "name": "strictRedaction",
+  "type": "checkbox",
+  "required": false,
+  "title": "Strict Redaction",
+  "label": "Also hide URL query strings and fragments in logs",
+  "description": "Turn on before sharing a log. Masks every URL query string and fragment, including values that automatic redaction cannot recognize by name.",
+  "default": false
+}
+```
+
+An extension can also set the level in code:
+
+```typescript
+new Logger({ enableRedaction: "strict" });   // true and "standard" are the same level
+```
+
+**Precedence:** the user preference wins. When `strictRedaction` is on, the effective
+level is strict even if the extension configured `enableRedaction: false` — the user's
+privacy control beats the author's convenience. When the preference cannot be read, the
+configured level is used, *including* `false`; that is a fallback to the author's
+policy, not fail-closed.
+
+**Exact behavior.** Query and fragment are masked independently, each to a single
+marker; userinfo and path are untouched; everything standard masks is still masked:
+
+| Input | Strict output |
+| --- | --- |
+| `https://h/p?a=1&sid=x` | `https://h/p?***` |
+| `https://h/p#section` | `https://h/p#***` |
+| `https://h/p?a=1#section` | `https://h/p?***#***` |
+| `https://h/p?next=https://i/cb?t=1` | `https://h/p?***` |
+| `https://user:secret@h/p?q=1` | `https://***:***@h/p?***` |
+| `https://h/p/q` | `https://h/p/q` |
+
+This applies wherever a URL can reach the console: message strings, structured
+values under any key, `URL` instances, `Error` messages and stacks, `RegExp` sources,
+property *names*, the prefix, step identifiers, and `inspect()` labels. Two known
+limits are inherited from the URL matcher and are pinned by tests rather than fixed:
+an IPv6 host (`https://[::1]/…`) is not recognized as a URL, and a `)` inside a query
+ends the match early.
+
+Strict mode does **not** mask path segments on their shape. A high-entropy path
+segment is an ID, not a secret, and masking it turns forty distinct requests into
+forty identical lines — which is exactly the failure 1.4.0 fixed.
+
 ### Child Loggers with Prefixes
 
 Create scoped loggers for different parts of your extension:
@@ -268,7 +336,7 @@ new Logger(config?: LoggerConfig)
 |--------|------|---------|-------------|
 | `isVerboseEnabled` | `() => boolean` | Uses preferences | Custom function to check if verbose logging is enabled |
 | `prefix` | `string` | `""` | Prefix to add to all log messages |
-| `enableRedaction` | `boolean` | `true` | Whether to enable automatic redaction |
+| `enableRedaction` | `boolean \| "standard" \| "strict"` | `true` | Redaction level. `true` and `"standard"` are the same; `"strict"` also masks URL query strings and fragments (see [Strict Redaction](#strict-redaction)); `false` disables redaction. The `strictRedaction` user preference overrides this. |
 | `showTimestamp` | `boolean` | `false` | Include ISO timestamps in output |
 | `showContext` | `boolean` | `false` | Include file:line context (LLM-friendly) |
 | `colorize` | `boolean` | `true` | Enable ANSI color codes |
@@ -283,7 +351,13 @@ const safe = redactString("password=secret123"); // -> "password=***"
 
 // Sanitize an array of arguments
 const safeArgs = sanitizeArgs([{ token: "abc123" }]); // -> [{ token: "***" }]
+
+// Both take an optional level; the default is "standard"
+redactString("GET https://h/p?sid=x", { level: "strict" }); // -> "GET https://h/p?***"
+sanitizeArgs([{ url: "https://h/p?sid=x" }], { level: "strict" }); // -> [{ url: "https://h/p?***" }]
 ```
+
+Exported types: `LoggerConfig`, `LoggerPreferences`, `RedactionLevel` (`"standard" | "strict"`), `RedactionOptions` (`{ level?: RedactionLevel }`).
 
 ## What Gets Redacted?
 
@@ -328,7 +402,7 @@ The cost is accepted knowingly: `cancellationToken` and `refreshTokenExpiresAt` 
 - **Long hex strings**: 32+ characters containing both digits and hexadecimal letters (potential tokens/hashes)
 - **Base64-like strings**: 20+ characters in complete base64 blocks with a digit, `+`, `/`, or padding signal
 
-Benign URLs are preserved byte-for-byte and excluded from the hex/base64 patterns. Userinfo credentials and sensitive query or fragment parameters such as `access_token`, `api_key`, `client_secret`, and `password` are masked in whole URLs and URLs embedded in messages. `?`, `&`, `#`, and `;` all delimit parameters, so a credential in a **nested** URL (`?redirect=https://idp/cb?access_token=...`) or after a semicolon is masked rather than hidden inside the outer parameter's value.
+Benign URLs are preserved byte-for-byte and excluded from the hex/base64 patterns. Userinfo credentials and sensitive query or fragment parameters such as `access_token`, `api_key`, `client_secret`, and `password` are masked in whole URLs and URLs embedded in messages. `?`, `&`, `#`, and `;` all delimit parameters, so a credential in a **nested** URL (`?redirect=https://idp/cb?access_token=...`) or after a semicolon is masked rather than hidden inside the outer parameter's value. Under [strict redaction](#strict-redaction) the whole query and fragment are masked regardless of parameter name.
 
 **Objects are walked directly, not serialized through `JSON.stringify`.** A custom `toJSON()` is never invoked, because it runs *before* any redaction and could move a credential onto an innocent-looking key:
 
@@ -339,7 +413,7 @@ logger.info("state", { password: "hunter2", toJSON() { return { note: this.passw
 
 `Date`, `RegExp`, and `URL` are handled explicitly so they keep their meaning, and are read through their **intrinsic prototype methods** — a subclass overriding `toISOString`, or an object with an own `href` getter, cannot hand the walker an arbitrary string that bypasses redaction. Circular references render as `[Circular]` with sibling fields preserved, and traversal is bounded (depth 12, 200 object entries, 500 array entries) with explicit truncation markers.
 
-Getters *are* still invoked, matching v1 behavior — this is a redaction boundary, not a side-effect-free snapshotter. A throwing getter turns the whole argument into a withheld marker rather than leaking it.
+Getters *are* still invoked, matching v1 behavior — this is a redaction boundary, not a side-effect-free snapshotter. A throwing getter, or a function whose `name` getter throws, turns the whole argument into a fixed withheld marker (`[unserializable value — withheld to avoid logging unredacted data]`) rather than leaking it. The marker carries nothing from the value, not even its type tag, because that tag is a getter too.
 
 Redaction is a defense-in-depth safeguard, not a substitute for avoiding secrets in logs. Ambiguous unlabeled values—especially unpadded, letters-only tokens—cannot be reliably distinguished from ordinary prose, so prefer structured objects with descriptive keys when logging potentially sensitive data.
 

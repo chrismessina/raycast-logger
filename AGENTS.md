@@ -64,8 +64,14 @@ Three modules, all under `src/`.
 
 ### `src/redaction.ts` — the security core
 
-Public: `redactString(input)` and `sanitizeArgs(args)`, plus `redactByKey` /
-`redactValueByKey` used internally.
+Public: `redactString(input, options?)` and `sanitizeArgs(args, options?)`, plus
+`redactByKey` / `redactValueByKey` used internally. `options.level` is
+`"standard"` (default) or `"strict"`; strict additionally masks every URL query
+and fragment. **The level is threaded as an argument through the whole chain
+and never stored in module state** — two loggers at different levels must not
+interfere. The Logger resolves the effective level once per call
+(`effectiveRedaction()`: the `strictRedaction` user preference wins, even over a
+configured `false`) and passes that one value to every redaction site.
 
 **One policy function decides everything.** `isCredentialKey(key)` is consulted
 by *both* the message-level rules and the structured walker. This is
@@ -154,11 +160,22 @@ compatibility commitment to published extensions.
 - **Module-scope regexes must only be used with `String.replace()`,** which
   resets `lastIndex`. Calling `.test()` / `.exec()` / `.matchAll()` on a
   `g`-flagged shared regex makes redaction nondeterministic.
+- **`CHANGELOG.md` follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).**
+  Section headings are only the six types, in this order: Added, Changed,
+  Deprecated, Removed, Fixed, Security — no invented ones ("Packaging",
+  "Documentation", prose like "Fixed URL redaction bug" were all folded in). A
+  closed redaction leak is Security, not Fixed; different output for the same
+  input, a type widening, or a packaging change is Changed; a crash or wrong
+  result is Fixed. Every version heading is `## [X.Y.Z] - YYYY-MM-DD` with a
+  link reference at the bottom (`[X.Y.Z]: https://github.com/chrismessina/raycast-logger/compare/vPREV...vX.Y.Z`),
+  and `[Unreleased]` points at `compare/vLATEST...HEAD` — adding a version means
+  adding its link and moving the Unreleased link. Invented headings drift back
+  in one release at a time, which is why the file needed reconforming.
 
 ## Testing expectations
 
-`test/redaction.test.mjs` and `test/logger.test.mjs` (114 cases) import the
-compiled leaf modules. `redaction.test.mjs` imports `dist/redaction.js`
+`test/redaction.test.mjs`, `test/logger.test.mjs`, `test/strict.test.mjs`, and
+`test/package.test.mjs` (149 cases) import the compiled leaf modules. `redaction.test.mjs` imports `dist/redaction.js`
 directly rather than the barrel, because `index.js` pulls in `logger.js`, which
 requires `@raycast/api` — a package with no loadable runtime outside Raycast.
 `logger.test.mjs` stubs that module via `Module._load`.
@@ -202,7 +219,7 @@ Unlink with `npm unlink @chrismessina/raycast-logger` in the extension and
 | --- | --- |
 | `README.md` | Full API reference, redaction rules, examples |
 | `QUICKSTART.md` | Three-step setup for a consuming extension |
-| `CHANGELOG.md` | Version history — security entries state the *mechanism* |
+| `CHANGELOG.md` | Version history, [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) format — security entries state the *mechanism* |
 | `SECURITY.md` | Private vulnerability reporting |
 | `docs/solutions/` | Documented solutions to past problems, by category with YAML frontmatter (`module`, `tags`, `problem_type`) — relevant when implementing or debugging in a documented area |
 | `CONCEPTS.md` | Shared domain vocabulary (redaction, credential key, emitted vs visible) |
