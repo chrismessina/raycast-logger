@@ -10,81 +10,143 @@ when it disagrees with the proposal, the proposal wins and this file needs updat
 # Now: 1.5.0 — strict redaction (branch `release/1.5`)
 
 **Decided 2026-09-06 (Chris, option B):** 1.5.0 ships *before* 2.0, on its own branch.
-The strict-redaction change is additive — `true` must keep compiling under the v2
-compatibility contract, so the field becomes `boolean | "standard" | "strict"` and earns
-no major. Landing it separately keeps a redaction-policy change out of the same release as
-the emission-pipeline rewrite; a leak in `2.0.0-next.1` would otherwise have two suspects.
-Full argument in the Deferred section below ("Strict redaction as a user preference"),
-which is now promoted.
+The strict-redaction change is additive for **constructor inputs** — every existing
+`new Logger({ enableRedaction: true })` and `false` keeps compiling, which is what the v2
+compatibility contract promises — so the field becomes `boolean | "standard" | "strict"`
+and earns no major. One narrow break is accepted: a consumer that reads
+`config.enableRedaction` *back out* of a `LoggerConfig` into a `boolean` variable stops
+compiling. No fleet extension does that (they only construct), and it goes in the
+changelog. Landing 1.5 separately keeps a redaction-policy change out of the same release
+as the emission-pipeline rewrite; a leak in `2.0.0-next.1` would otherwise have two
+suspects. The original argument is in the Deferred section below ("Strict redaction as
+a user preference"), now promoted; where that section's sketch disagrees with this one,
+this one wins.
 
 Branches: `release/1.5` for everything in this section, `release/2.0` for Phase 1. Both cut
-from `main` at the docs commit that records this decision. 1.5 merges to `main` first;
-2.0 rebases onto it and designs `ResolvedLoggerConfig` with a resolved redaction level
-from the start.
+from `main` at `9bf1488`. 1.5 merges to `main` first; 2.0 rebases onto it and designs
+`ResolvedLoggerConfig` with a resolved redaction level from the start.
 
 ## Strict redaction — design decisions (settled, build to these)
 
-1. **Two rules, ship one.** Strict = drop URL **query and fragment**. That is unambiguous
-   and is exactly digger's `redactUrlForLog` (origin + pathname). Masking "long opaque
-   path segments" is a *classification bound* — the trap four Codex rounds and the 1.4.0
-   karakeep bug taught — and does **not** ship in 1.5. If it ever does, it is a separate
-   line item with a stated discriminator and both-direction tests.
-2. **Marker, not silence.** `https://host/path?***` (and `#***`), never a bare drop. A
-   reader can see something was withheld.
+1. **Two rules, ship one.** Strict = mask URL **query and fragment**. Same intent as
+   digger's `redactUrlForLog` (`raycast-digger/src/utils/urlUtils.ts:146-153`, origin +
+   pathname), but not the same output: the logger keeps the caller's original formatting
+   and userinfo masking (`src/redaction.ts:339-340`), never re-serializes through `URL`,
+   and leaves a marker. Masking "long opaque path segments" is a *classification
+   bound* — the trap four Codex rounds and the 1.4.0 karakeep bug taught — and does
+   **not** ship in 1.5. If it ever does, it is a separate line item with a stated
+   discriminator and both-direction tests.
+2. **Marker, not silence — exact outputs.** Query and fragment are masked
+   *independently*, each to a single marker, and the fragment is whatever follows the
+   first `#` even if it contains `?`:
+   | input | strict output |
+   | --- | --- |
+   | `https://h/p?a=1&sid=x` | `https://h/p?***` |
+   | `https://h/p#sec` | `https://h/p#***` |
+   | `https://h/p?a=1#sec` | `https://h/p?***#***` |
+   | `https://h/p?` (empty query) | `https://h/p?***` |
+   | `https://h/p?next=https://i/cb?t=1` | `https://h/p?***` (the nested URL is query content and goes with it) |
+   | `https://u:s@h/p?q=1` | `https://***:***@h/p?***` |
+   | `https://h/p;token=x` | `https://h/p;token=***` (standard already masks this — strict is a **superset** of standard, so standard runs first and strict only replaces the query/fragment runs) |
+   The URL run itself is whatever the existing extractor matched
+   (`/https?:\/\/[^\s"'<>\])}]+/gi`, `src/redaction.ts:466`). Its known boundaries are
+   inherited, not fixed here: an IPv6 host (`https://[::1]/p?sid=x`) is not recognized
+   as a URL at all, and a `)` inside a query ends the run early. Both are pre-existing
+   standard-mode limits; pin them with tests that document current output so a later
+   change is deliberate.
 3. **Preference is declared per extension.** Raycast reads preferences from the
    extension manifest; the package cannot inject one. README ships a paste-in block
    (`strictRedaction`, checkbox, default `false`), and the `develop` house style gains a
    line for it. This closes the "manifest or package?" open question.
-4. **Precedence is one rule.** Effective level = `"strict"` when the user preference is
-   on, otherwise the config value (`false` | `"standard"` | `"strict"`; `true` ≡
-   `"standard"`). The user's privacy control beats the author's convenience. Children
-   inherit; there is no per-child opt-out. Read the preference the same way
-   `verboseLogging` is read — per call, fail-closed to the config value if
-   `getPreferenceValues` throws.
-5. **Thread it, never store it.** `redactString(input, options?)` and
-   `sanitizeArgs(args, options?)` gain an optional options argument carried down through
-   `safeTree` and `redactUrl`. **No module-level mode flag** — two loggers in one extension
-   would fight. The same options argument later carries `additionalSensitiveKeys` in 2.0,
-   so shape it once: `{ level: "standard" | "strict" }` now, extended later.
+4. **Precedence is one rule, resolved once per call.** Effective level = `"strict"` when
+   the user preference is on, otherwise the configured value (`false` | `"standard"` |
+   `"strict"`; `true` ≡ `"standard"`). The preference wins even over a configured
+   `false` — the user's privacy control beats the author's convenience. Children inherit
+   the configured value through `child()`'s spread (`src/logger.ts:463`) and read the
+   preference themselves, so a preference flipped mid-session takes effect on the next
+   call of every logger; there is no per-child opt-out. If `getPreferenceValues` throws,
+   the level **falls back to the configured value** — which can be `false`, so this is
+   *not* fail-closed and must be stated as such in the README. Read the preference the
+   same way `verboseLogging` is read, and note that path's own error logging
+   (`sanitizeArgs([error])` at `src/logger.ts:119` and `:133`) must use the configured
+   level, since the preference is what just failed.
+5. **Thread it, never store it — the full chain.** `redactString(input, options?)` and
+   `sanitizeArgs(args, options?)` gain `{ level: "standard" | "strict" }` (2.0 extends the
+   same object with `additionalSensitiveKeys`). **No module-level mode flag** — two
+   loggers in one extension would fight. The option must reach every place a string can
+   be emitted, and the current code has more of them than the three obvious ones:
+   - `sanitizeArgs` → `redactedClone` → `safeTree` (recursive) → `redactByKey`
+     (`src/redaction.ts:663`) → `redactString`. **`redactByKey`'s identifier branch
+     returns `maskEmail(value)` only** (`src/redaction.ts:547-548`), so today
+     `{ user: "https://h/p?sid=x" }` never sees URL redaction. Under strict that branch
+     must also run the URL pass; under standard it stays byte-identical.
+   - `errorToTree` calls `redactString` directly for `name`, `message`, `stack`
+     (`src/redaction.ts:595-598`) and recurses for `cause`/`errors`.
+   - the `RegExp` and `URL` built-in branches (`src/redaction.ts:691-694`).
+   - Logger sites: `safeText` (`src/logger.ts:191` — prefix, `step` id, `inspect`
+     label), `processLogData` (`:243`), `inspect` (`:432` and the `:439` fallback), and
+     the two preference-error paths above.
 
 `safe()` composition is moot until `safe()` exists. Record only: strict must not
 preclude a per-value override later.
 
 ## 1.5.0 checklist
 
-- [ ] **Witnessed red first.** Failing tests for: query masked under strict, fragment
-      masked under strict, path and host byte-identical under strict, `?***` marker
-      present (positive assertion), standard mode byte-identical to 1.4.0 on the same
-      inputs, `true` ≡ `"standard"`, preference `true` overrides config `"standard"`,
-      preference read failure falls back to config, children inherit the level, embedded
-      URL in a message string masked, `{ url }` in structured args masked, `URL` instance
-      in args masked (goes through `redactString(href)` at `src/redaction.ts:694`).
+- [ ] **Witnessed red first — paste the raw failing output before touching `src/`.**
+      Every test asserts a **positive** half (the marker is present, or a diagnostic
+      sibling survived) as well as the absence; do not treat the existing suite as
+      preservation coverage — it has absence-only cases (`test/redaction.test.mjs:78`,
+      `:500-501`, `:577`, `:589`, `:635` among others). Exact-output tests for:
+      - every row of the table in decision 2, as a message string, as `{ url }` in args,
+        as a `URL` instance in args, inside an `Error` message and `stack`, and under
+        an identifier key (`{ user: … }`, `{ email: … }`);
+      - the IPv6 and `)` boundary cases, pinning current output;
+      - standard mode byte-identical to 1.4.0 on every fixture above (run the same
+        fixtures with `level: "standard"` and diff against 1.4.0 output captured once);
+      - `true` ≡ `"standard"`, `false` still returns raw args;
+      - preference `true` overrides configured `"standard"` **and** configured `false`,
+        across message, args, prefix, `step`, `inspect`, and the inspect fallback;
+      - preference read failure falls back to the configured value, including `false`;
+      - a child created before the preference flips observes the flip on its next call;
+      - two `Logger` instances at different levels in one process do not leak into each
+        other (interleaved calls);
+      - input objects are not mutated.
 - [ ] `LoggerConfig.enableRedaction: boolean | "standard" | "strict"`;
-      `LoggerPreferences.strictRedaction?: boolean`.
-- [ ] Options argument on `redactString` / `sanitizeArgs`, threaded to `redactUrl`.
-- [ ] `redactUrl` strict branch: mask everything after the first `?` or `#` in the URL
-      run, preserving userinfo and credential-param masking as-is (strict is a superset).
-- [ ] Logger: resolve the level once per call (config + preference), pass it at the
-      three redaction sites — `processLogData`, `safeText`, `inspect`
-      (`src/logger.ts:191`, `:243`, `:432`).
+      `LoggerPreferences.strictRedaction?: boolean`. Note the read-back caveat in the
+      changelog.
+- [ ] Options argument on `redactString` / `sanitizeArgs`, threaded through the full
+      chain in decision 5.
+- [ ] `redactUrl` strict branch per decision 2: run standard first, then replace the
+      query run and the fragment run with their markers.
+- [ ] Logger: resolve the effective level once per call and pass that one value to
+      every site in decision 5.
 - [ ] `redactByKey` docstring at `src/redaction.ts:515-516` and `:562` — delete the
       "safe to use as JSON.stringify replacer" sentences. Three sessions flagged it.
-- [ ] Drop source maps from the tarball: remove `.map` from `files` (or `sourceMap:
-      false`); the existing packing test must still pass. 26,795 of 32,828 packed bytes.
-- [ ] README: config table row, preference paste-in block, a strict-mode section with a
-      before/after line, and the digger rationale in two sentences (local, off by default,
-      the control belongs at the moment of sharing).
+- [ ] Drop source maps from the tarball. `files` is `["dist", "SECURITY.md"]`
+      (`package.json:9-12`) with no `.map` entry to remove, so the mechanism is: set
+      `sourceMap` and `declarationMap` to `false` in `tsconfig.json:7-8`, and add
+      `"!dist/**/*.map"` to `files` so a stale local build cannot pack them either. Size
+      basis, unpacked: 26,795 of 106,786 bytes (≈25%); the 32,828 figure is the
+      *compressed* tarball and must not be compared against it.
+- [ ] **New** packing test (none exists — `test/*.mjs` never inspects package
+      contents; CI only runs `npm pack --dry-run`): `npm pack --json` and assert no
+      `.map`, nothing under `.github/`, and that `dist/index.js` + `dist/index.d.ts` are
+      present.
+- [ ] README: config table row, preference paste-in block, a strict-mode section with
+      the table from decision 2, the fallback-is-not-fail-closed note, and the digger
+      rationale in two sentences (local; the control belongs at the moment of sharing).
 - [ ] CHANGELOG 1.5.0. Codex review with the claimed-closed list. Then the release
       mechanics in `AGENTS.md`.
-- [ ] **Fleet rollout to 1.5 — hold lifted (option B).** Bump the seven below `^1.4`
-      to `^1.5.0` using the per-repo procedure in the rollout section below. Stage only
-      the two dependency files. `digger` additionally declares the preference and can
-      delete `redactUrlForLog` and its ~17 call sites — confirm none logs a URL for its
-      path *only* where the origin would now be redundant.
+- [ ] **Fleet rollout to 1.5 — hold lifted (option B).** Once 1.5.0 is on npm, bump the
+      seven below `^1.4` using the per-repo procedure in the rollout section below.
+      `digger` additionally declares the preference. Whether digger then deletes
+      `redactUrlForLog` is **digger's decision, not made here**: with the preference off
+      by default, deleting it re-exposes query strings at its 14 warn/error sites, which
+      is exactly what its own `AGENTS.md:149-157` argues is usually the right trade but
+      still a change in default behavior.
 - [ ] Update `dep-gates.md` floor to `^1.5` when published.
 
 ---
-
 # Next: the 2.x series (branch `release/2.0`)
 
 2.0.0 is **Phase 1 alone — the record/transport foundation.** Phase 2 (the bounded
@@ -103,7 +165,7 @@ implementation time rather than design time.
       into the transport contract before any transport code exists.
 - [ ] **Audit deep `dist/*` imports before adding the `exports` map.** An `exports`
       map silently breaks anyone importing `dist/*` directly. Evidence first
-      (`v2-proposal.md:594`), then the decision.
+      (proposal §Phase 0 item 4 and §Packaging — grep for `deep imports`, the line numbers rot), then the decision.
 - [ ] **Decide how `transport` replacing the console transport is communicated.**
       Supplying `transport` *replaces* console output (`v2-proposal.md:200`) — the
       single most user-visible migration hazard. A consumer adding one transport
@@ -281,8 +343,11 @@ it without being asked.
 Chris's objection, and it is correct: dropping query strings makes logs materially worse
 at their job. In `digger` the query is frequently *the thing being analysed* — log
 `example.com/search?q=foo` without its query and the line describes a different request
-than the one that ran. These logs are already local, already off by default, and already
-behind a Debug Logging preference. A debug log that omits the input is not a safer log,
+than the one that ran. These logs are already local, and the `log`/`debug` ones are off by
+default behind a Debug Logging preference. *(Correction 2026-09-06: `warn`, `error`, and
+`info` emit regardless of that preference — `src/logger.ts:279-317` — so "off by default"
+holds only for the gated levels. Store builds suppress the console either way; "local"
+is the load-bearing word.)* A debug log that omits the input is not a safer log,
 it is a useless one, and users respond to useless logs by turning logging off — which is
 strictly worse for their privacy than a detailed local log they never share.
 
@@ -303,7 +368,7 @@ at the moment of sharing, which is a user action, which means a preference.
 - **Cost is one checkbox per consuming extension.** Real, and the reason this is a
   preference rather than always-on.
 
-### Sketch (not authoritative)
+### Sketch (not authoritative — SUPERSEDED by the settled decisions at the top of this file; the "long opaque path segments" rule below was rejected)
 
 ```ts
 // LoggerPreferences
@@ -323,10 +388,12 @@ fooled by a key name, accepted precisely because the user asked for it.
 `docs/solutions/security-issues/json-stringify-tojson-defeats-key-based-redaction.md`
 records key-based redaction failing open through a `toJSON()` bypass — severity critical,
 and the fix restored the *same* key-based mechanism. Strict mode is defence in depth for
-that whole class: a pass that ignores key names cannot be defeated by relocating a value
-onto an innocuous one.
+the narrower class it actually covers: a sensitive **URL query or fragment** under a key
+nobody would flag. *(Correction 2026-09-06: it does not cover the `toJSON` relocation of
+a bare secret onto an innocent key — that is closed by never invoking `toJSON`, not by
+URL stripping.)*
 
-### Open questions
+### Open questions (all three answered in the settled decisions at the top; kept for the reasoning)
 
 - Does strict mode subsume `redactUrlForLog` outright, letting `digger` delete its helper
   and its ~20 inconsistent call sites? Probably, and that is most of the value — but
@@ -347,9 +414,10 @@ the critical `toJSON` fail-open, that cost scales with how long 2.0 takes, and f
 default-config consumer both the 1.5 and the 2.0 bump are lockfile-only changes — about
 ten minutes per repo. Update `dep-gates.md` to match when 1.5 publishes.
 
-Current census (2026-08-30): **11 extensions depend on the logger; 7 are below
-`^1.4`.** Already current: `raycast-digger`, `raycast-ios-apps`, `raycast-karakeep`,
-`raycast-reader` — several picked it up alongside their own `@raycast/api` 2.x moves.
+Current census (2026-09-06): **12 extensions depend on the logger; 7 are below
+`^1.4`.** Already current: `raycast-attio`, `raycast-digger`, `raycast-ios-apps`,
+`raycast-karakeep`, `raycast-reader` — several picked it up alongside their own
+`@raycast/api` 2.x moves. (Attio was missed by the 2026-08-30 count.)
 | Extension | Range | Status |
 | --- | --- | --- |
 | `raycast-brew` | `^1.0.0` | below — oldest, predates all redaction work |
@@ -363,6 +431,7 @@ Current census (2026-08-30): **11 extensions depend on the logger; 7 are below
 | `raycast-ios-apps` | `^1.4.0` | current — first `@raycast/api` 2.x adopter |
 | `raycast-karakeep` | `^1.4.0` | current — use as the reference bump |
 | `raycast-reader` | `^1.4.0` | current |
+| `raycast-attio` | `^1.4.0` | current |
 
 **This census rots fast — it moved twice inside a single session.** Two repos in an
 earlier count (`sora`, `parallel-web-tools`) are no longer present on disk at all.
@@ -388,19 +457,22 @@ One hard prerequisite lives there too: logger `<= 1.3.0` with `@raycast/api` 2.x
 hard `npm ERESOLVE` — not a warning, the install fails. Any v2 migration must bump
 the logger first.
 
-### Per-repo procedure (for when the hold lifts)
+### Per-repo procedure (run once 1.5.0 is on npm)
 
 ```bash
-npm install @chrismessina/raycast-logger@latest
+npm view @chrismessina/raycast-logger version          # must print 1.5.x before you continue
+npm install @chrismessina/raycast-logger@^1.5.0         # explicit range, never @latest — latest becomes 2.0 later
 # The lockfile is what ships, not the manifest range — verify it moved:
 node -p "require('./package-lock.json').packages['node_modules/@chrismessina/raycast-logger'].version"
 npx tsc --noEmit && npm run lint && npm run build
 ```
 
-Several of these repos carry uncommitted work. **Stage only `package.json` and
-`package-lock.json`; never `git add -A`.** `raycast-ios-apps` was the live example —
-its two dependency files also held an unrelated in-flight `adm-zip` removal, so a
-naive stage would have bundled someone else's change into a security bump.
+Several of these repos carry uncommitted work, **including inside the two dependency
+files themselves** — `raycast-ios-apps` was the live example: its `package.json` and
+lockfile also held an unrelated in-flight `adm-zip` removal, so staging the whole files
+would have bundled someone else's change into a security bump. So: never `git add -A`,
+and stage the two files by **hunk** (`git add -p`), taking only the logger lines. If the
+lockfile diff is not separable by hunk, stop and report rather than staging it.
 
 ### The behavior change to check per repo
 
