@@ -236,7 +236,9 @@ test("strict: a top-level function whose name getter throws is withheld, not thr
     out = sanitizeArgs([f, "kept"], STRICT);
   });
   assert.deepEqual(out, [MARKER, "kept"]);
-  // And through the logger, including the inspect fallback path this reaches.
+  // And through the logger. Note this does NOT reach inspect's own catch: the
+  // guarded clone already turned the throw into the marker, so inspect just
+  // renders a withheld value. Under redaction that catch has no known trigger.
   reset();
   const logger = new Logger({ isVerboseEnabled: () => true, enableRedaction: "strict", colorize: false });
   let calls;

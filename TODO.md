@@ -86,9 +86,10 @@ from `main` at `9bf1488`. 1.5 merges to `main` first; 2.0 rebases onto it and de
      (`src/redaction.ts:595-598`) and recurses for `cause`/`errors`.
    - the `RegExp` and `URL` built-in branches (`src/redaction.ts:691-694`).
    - Logger sites: `safeText` (prefix, `step` id, `inspect` label), `processLogData`,
-     `inspect` (including its fallback, which IS reachable: a function whose `name`
-     getter throws makes sanitization itself throw), and the two verbosity-failure
-     diagnostics above. Line numbers deliberately omitted — grep the function names.
+     `inspect` (its own `catch` has no known trigger under redaction — the guarded
+     clone converts every throw to the marker before `JSON.stringify` runs; it is
+     reachable only with `enableRedaction: false` on a cyclic value), and the two
+     verbosity-failure diagnostics above. Line numbers deliberately omitted — grep the function names.
    - Found by Codex rounds 1–2, all now fixed and pinned in `test/strict.test.mjs`:
      top-level functions/symbols returned raw by `sanitizeArgs`; `RegExp` sources hide
      URLs behind `\/`; the withheld marker interpolated a hostile `Symbol.toStringTag`

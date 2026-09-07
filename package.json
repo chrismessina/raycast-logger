@@ -8,7 +8,9 @@
   "sideEffects": false,
   "files": [
     "dist",
-    "SECURITY.md"
+    "!dist/**/*.map",
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc",
