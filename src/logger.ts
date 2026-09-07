@@ -1,5 +1,5 @@
 import { getPreferenceValues } from "@raycast/api";
-import { redactString, sanitizeArgs } from "./redaction";
+import { redactString, sanitizeArgs, WITHHELD, type RedactionLevel, type RedactionOptions } from "./redaction";
 
 /**
  * ANSI color codes for terminal output (zero dependencies)
@@ -22,6 +22,14 @@ const colors = {
  */
 export interface LoggerPreferences {
   verboseLogging?: boolean;
+  /**
+   * User-controlled strict redaction (1.5.0). When true, every URL query string
+   * and fragment is masked in addition to the standard rules — a floor the
+   * user raises before sharing a log. Overrides the extension's configured
+   * `enableRedaction`, including `false`. Off by default; declare it as a
+   * checkbox preference in the extension manifest to expose it.
+   */
+  strictRedaction?: boolean;
 }
 
 /**
@@ -40,10 +48,17 @@ export interface LoggerConfig {
   prefix?: string;
 
   /**
-   * Whether to enable automatic redaction of sensitive data
+   * Automatic redaction of sensitive data.
+   *
+   * - `true` / `"standard"` — the default rules.
+   * - `"strict"` — standard plus every URL query string and fragment masked.
+   * - `false` — off.
+   *
+   * The `strictRedaction` user preference, when true, raises the effective
+   * level to `"strict"` regardless of this value.
    * @default true
    */
-  enableRedaction?: boolean;
+  enableRedaction?: boolean | RedactionLevel;
 
   /**
    * Whether to include timestamps in log messages
@@ -97,7 +112,9 @@ export class Logger {
 
   constructor(config: LoggerConfig = {}) {
     this.config = {
-      isVerboseEnabled: config.isVerboseEnabled || this.defaultVerboseCheck,
+      // Bound explicitly: the callback is invoked as `this.config.isVerboseEnabled()`,
+      // so an unbound method reference would see the config object as `this`.
+      isVerboseEnabled: config.isVerboseEnabled || (() => this.defaultVerboseCheck()),
       prefix: config.prefix || "",
       enableRedaction: config.enableRedaction ?? true,
       showTimestamp: config.showTimestamp ?? false,
@@ -116,7 +133,10 @@ export class Logger {
       return preferences.verboseLogging || false;
     } catch (error) {
       // If preferences can't be read, default to not logging
-      console.error("[Logger] Failed to read preferences for verbose logging:", ...sanitizeArgs([error]));
+      console.error(
+        "[Logger] Failed to read preferences for verbose logging:",
+        ...sanitizeArgs([error], this.configuredRedaction() || undefined),
+      );
       return false;
     }
   }
@@ -130,7 +150,12 @@ export class Logger {
     try {
       return this.config.isVerboseEnabled();
     } catch (error) {
-      console.error("[Logger] Failed to determine verbose logging state:", ...sanitizeArgs([error]));
+      // The author's callback failed, not the preference read, so the user's
+      // strict preference still applies here.
+      console.error(
+        "[Logger] Failed to determine verbose logging state:",
+        ...sanitizeArgs([error], this.effectiveRedaction() || undefined),
+      );
       return false;
     }
   }
@@ -182,19 +207,51 @@ export class Logger {
     return null;
   }
 
+  /** The level set in config, with `true` normalized to `"standard"`. */
+  private configuredRedaction(): RedactionOptions | false {
+    const configured = this.config.enableRedaction;
+    if (configured === false) return false;
+    return { level: configured === true ? "standard" : configured };
+  }
+
+  /**
+   * The level in force for THIS call: the `strictRedaction` user preference
+   * raises it to strict — over `"standard"` and over a configured `false`,
+   * because the user's floor beats the author's convenience. Resolved once per
+   * log call and passed to every redaction site, never stored, so two loggers
+   * at different levels cannot interfere and a preference flipped mid-session
+   * takes effect on the next call of every logger, children included.
+   *
+   * If the preference cannot be read this falls back to the configured value,
+   * which can be `false`. That is a fallback to the author's policy, not
+   * fail-closed. Nothing is logged here: the preference read is the thing
+   * that failed, and `defaultVerboseCheck` already reports that.
+   */
+  private effectiveRedaction(): RedactionOptions | false {
+    const configured = this.configuredRedaction();
+    if (configured && configured.level === "strict") return configured;
+    try {
+      if (getPreferenceValues<LoggerPreferences>().strictRedaction === true) return { level: "strict" };
+    } catch {
+      // Fall through to the configured level.
+    }
+    return configured;
+  }
+
   /**
    * Redact a developer-supplied formatting input when redaction is enabled.
-   * Applies to values that are interpolated at runtime — the prefix and the
-   * step identifier — which reach the console outside `processLogData`.
+   * Applies to values that are interpolated at runtime — the prefix, the
+   * step identifier, and the inspect label — which reach the console outside
+   * `processLogData`.
    */
-  private safeText(text: string): string {
-    return this.config.enableRedaction ? redactString(text) : text;
+  private safeText(text: string, redaction: RedactionOptions | false): string {
+    return redaction ? redactString(text, redaction) : text;
   }
 
   /**
    * Format a message with optional timestamp, context, and prefix
    */
-  private formatMessage(message: string, levelColor?: string): string {
+  private formatMessage(message: string, levelColor: string | undefined, redaction: RedactionOptions | false): string {
     const parts: string[] = [];
 
     if (this.config.showTimestamp) {
@@ -217,7 +274,7 @@ export class Logger {
       // prefix like "[ProductHuntFrontpage]" tripped the old base64 heuristic
       // and became "[***]"; that heuristic now requires a digit, `+`, `/`, or
       // padding signal, so ordinary prefixes pass through untouched.
-      parts.push(this.colorize(this.safeText(this.config.prefix), colors.magenta));
+      parts.push(this.colorize(this.safeText(this.config.prefix, redaction), colors.magenta));
     }
 
     // Apply level color to the message if provided
@@ -239,12 +296,17 @@ export class Logger {
    * camelCase prefix like "[ProductHuntFrontpage]" matched the base64-token heuristic and became
    * "[***]"). So we redact the raw message first, THEN format.
    */
-  private processLogData(message: string, args: unknown[], levelColor?: string): [string, unknown[]] {
-    if (!this.config.enableRedaction) {
-      return [this.formatMessage(message, levelColor), args];
+  private processLogData(
+    message: string,
+    args: unknown[],
+    levelColor?: string,
+    redaction: RedactionOptions | false = this.effectiveRedaction(),
+  ): [string, unknown[]] {
+    if (!redaction) {
+      return [this.formatMessage(message, levelColor, false), args];
     }
 
-    return [this.formatMessage(redactString(message), levelColor), sanitizeArgs(args)];
+    return [this.formatMessage(redactString(message, redaction), levelColor, redaction), sanitizeArgs(args, redaction)];
   }
 
   /**
@@ -392,8 +454,9 @@ export class Logger {
 
     // The step identifier is caller-supplied and reaches the console outside
     // processLogData, so it needs the same redaction as the description.
-    const label = this.colorize(`[Step ${this.safeText(String(step))}]`, colors.cyan, colors.bold);
-    const [processedMessage, processedArgs] = this.processLogData(description, data ? [data] : []);
+    const redaction = this.effectiveRedaction();
+    const label = this.colorize(`[Step ${this.safeText(String(step), redaction)}]`, colors.cyan, colors.bold);
+    const [processedMessage, processedArgs] = this.processLogData(description, data ? [data] : [], undefined, redaction);
     console.log(label, processedMessage, ...processedArgs);
   }
 
@@ -419,7 +482,8 @@ export class Logger {
   public inspect(label: string, value: unknown): void {
     if (!this.isVerboseEnabled()) return;
 
-    const safeLabel = this.safeText(label);
+    const redaction = this.effectiveRedaction();
+    const safeLabel = this.safeText(label, redaction);
     const separator = "=".repeat(Math.max(0, 40 - safeLabel.length - 2));
     const header = this.colorize(`=== ${safeLabel} ${separator}`, colors.magenta, colors.bold);
     const footer = this.colorize(
@@ -429,19 +493,17 @@ export class Logger {
 
     let formatted: string;
     try {
-      if (this.config.enableRedaction) {
-        const sanitized = sanitizeArgs([value])[0];
+      if (redaction) {
+        const sanitized = sanitizeArgs([value], redaction)[0];
         formatted = typeof sanitized === "string" ? sanitized : JSON.stringify(sanitized, null, 2);
       } else {
         formatted = JSON.stringify(value, null, 2);
       }
     } catch {
-      formatted = this.config.enableRedaction
-        ? "[unserializable value — withheld to avoid logging unredacted data]"
-        : String(value);
+      formatted = redaction ? WITHHELD : String(value);
     }
 
-    console.log(this.formatMessage(header));
+    console.log(this.formatMessage(header, undefined, redaction));
     console.log(formatted);
     console.log(footer);
   }

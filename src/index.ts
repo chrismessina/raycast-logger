@@ -6,4 +6,4 @@
  */
 
 export { Logger, logger, type LoggerConfig, type LoggerPreferences } from "./logger";
-export { redactString, sanitizeArgs } from "./redaction";
+export { redactString, sanitizeArgs, type RedactionLevel, type RedactionOptions } from "./redaction";

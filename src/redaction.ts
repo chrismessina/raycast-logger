@@ -28,6 +28,32 @@ const TWO_FACTOR_KEYS = new Set(["code", "otp", "2fa", "twofactor", "verificatio
 const IDENTIFIER_KEYS = new Set(["email", "appleid", "username", "user"]);
 
 /**
+ * Redaction level.
+ *
+ * - `"standard"` — the default: credential keys, labeled secrets, bearer
+ *   tokens, encoded secrets, emails, and credentials in URL userinfo and
+ *   credential-named query parameters.
+ * - `"strict"` — everything standard does, plus every URL query string and
+ *   fragment is replaced by a marker (`?***`, `#***`). This is a superset:
+ *   standard runs first, then the strict pass replaces what remains. It exists
+ *   for the case key-based rules cannot see — a sensitive value under an
+ *   unremarkable parameter name (`?sid=`, `?u=`) — and is opt-in because it
+ *   removes the query that is frequently the thing being diagnosed.
+ */
+export type RedactionLevel = "standard" | "strict";
+
+export interface RedactionOptions {
+  /** @default "standard" */
+  level?: RedactionLevel;
+}
+
+const URL_PATTERN = /https?:\/\/[^\s"'<>\])}]+/gi;
+
+function isStrict(options?: RedactionOptions): boolean {
+  return options?.level === "strict";
+}
+
+/**
  * Terms unambiguous enough to mark a compound key sensitive from ANY segment,
  * not just its head.
  *
@@ -323,7 +349,7 @@ function decodedCarriesCredential(rawValue: string): boolean {
  * Using string slices rather than serializing through `URL` avoids harmless
  * normalization changes to ports, escapes, query order, and punctuation.
  */
-function redactUrl(input: string): string {
+function redactUrl(input: string, strict = false): string {
   const schemeEnd = input.indexOf("://") + 3;
   if (schemeEnd < 3) return input;
 
@@ -349,7 +375,7 @@ function redactUrl(input: string): string {
   // matched as key `redirect` — not a credential — leaving the embedded
   // `access_token` fully visible. Semicolon-delimited parameters (`?a=1;token=x`)
   // hid the same way. Splitting on both makes each nested pair its own match.
-  return output.replace(
+  output = output.replace(
     /([?&#;])([^=&#;?]+)=([^&#;?]*)/g,
     (match, separator: string, rawKey: string, rawValue: string) => {
       let key = rawKey;
@@ -376,6 +402,25 @@ function redactUrl(input: string): string {
       return match;
     },
   );
+  if (!strict) return output;
+
+  // Strict: replace the whole query and the whole fragment with markers,
+  // independently. The fragment is everything from the first `#`; the query is
+  // everything from the first `?` that precedes it. A nested URL inside the
+  // query is query content and disappears with it. Userinfo and path are
+  // untouched, and the standard masking above has already run, so this is a
+  // superset of standard rather than a replacement for it.
+  const hash = output.indexOf("#", schemeEnd);
+  const queryEnd = hash === -1 ? output.length : hash;
+  const question = output.indexOf("?", schemeEnd);
+  const hasQuery = question !== -1 && question < queryEnd;
+  const base = output.slice(0, hasQuery ? question : queryEnd);
+  return `${base}${hasQuery ? "?***" : ""}${hash === -1 ? "" : "#***"}`;
+}
+
+/** The strict URL pass alone, for values that otherwise skip string redaction. */
+function redactUrlsStrictly(input: string): string {
+  return input.replace(URL_PATTERN, (match) => redactUrl(match, true));
 }
 
 /**
@@ -456,19 +501,17 @@ function maskEmail(text: string): string {
  * @param input String that may contain sensitive data
  * @returns Sanitized string with sensitive data redacted
  */
-export function redactString(input: string): string {
+export function redactString(input: string, options?: RedactionOptions): string {
   // Preserve URLs by replacing them with placeholders after scrubbing URL
   // credentials. This keeps benign paths out of the encoded-secret heuristics.
+  const strict = isStrict(options);
   const urlPlaceholders: string[] = [];
   let placeholderPrefix = "\uE000RAYCAST_LOGGER_URL_";
   while (input.includes(placeholderPrefix)) placeholderPrefix += "_";
-  let s = input.replace(
-    /https?:\/\/[^\s"'<>\])}]+/gi,
-    (match) => {
-      urlPlaceholders.push(redactUrl(match));
-      return `${placeholderPrefix}${urlPlaceholders.length - 1}\uE001`;
-    },
-  );
+  let s = input.replace(URL_PATTERN, (match) => {
+    urlPlaceholders.push(redactUrl(match, strict));
+    return `${placeholderPrefix}${urlPlaceholders.length - 1}\uE001`;
+  });
 
   // Apply redactions without touching the placeholders.
   s = s.replace(/\b(bearer)(\s+)[^\s"']+/gi, "$1$2***");
@@ -504,18 +547,22 @@ export function redactString(input: string): string {
 
   // Restore only placeholders created in this invocation. A caller-provided
   // string that resembles an old placeholder must remain byte-identical.
-  urlPlaceholders.forEach((url, index) => {
-    s = s.split(`${placeholderPrefix}${index}\uE001`).join(url);
-  });
+  // One pass rather than one split/join per URL: the per-URL loop rescanned
+  // the whole string each time and crossed 100ms on a 60KB string of URLs.
+  const restore = new RegExp(`${placeholderPrefix}(\\d+)\uE001`, "g");
+  s = s.replace(restore, (_m, index: string) => urlPlaceholders[Number(index)]);
 
   return s;
 }
 
 /**
- * Redact a value based on its key name - safe to use as JSON.stringify replacer
- * Does NOT recurse into objects; lets JSON.stringify handle traversal
+ * Redact a single PRIMITIVE value based on its key name.
+ *
+ * This is the per-value policy called by `safeTree` and `redactValueByKey`.
+ * It does not recurse; traversal is the walker's job, and the walker never
+ * uses `JSON.stringify` — see the `safeTree` doc comment for why.
  */
-export function redactByKey(key: string, value: unknown): unknown {
+export function redactByKey(key: string, value: unknown, options?: RedactionOptions): unknown {
   if (value == null) return value;
   const k = normalizeKey(key);
 
@@ -541,14 +588,17 @@ export function redactByKey(key: string, value: unknown): unknown {
     // readable, and still run the generic string redaction so an embedded
     // token in an unusual `code` value is caught.
     if (TWO_FACTOR_KEYS.has(k)) {
-      return /^\d{4,8}$/.test(value.trim()) ? "******" : redactString(value);
+      return /^\d{4,8}$/.test(value.trim()) ? "******" : redactString(value, options);
     }
-    // Partial masking for identifiers
+    // Partial masking for identifiers. This branch deliberately skips the
+    // generic string rules, so under strict the URL pass has to be applied
+    // here explicitly or `{ user: "https://…?sid=x" }` never sees it.
     if (IDENTIFIER_KEYS.has(k)) {
-      return maskEmail(value);
+      const masked = maskEmail(value);
+      return isStrict(options) ? redactUrlsStrictly(masked) : masked;
     }
     // Apply string redaction for other values
-    return redactString(value);
+    return redactString(value, options);
   }
 
   if (typeof value === "number") {
@@ -559,7 +609,7 @@ export function redactByKey(key: string, value: unknown): unknown {
 
   if (typeof value === "bigint" && TWO_FACTOR_KEYS.has(k)) return 0;
 
-  // Return objects/arrays as-is; JSON.stringify will recurse into them
+  // Objects and arrays are the walker's job; return them untouched here.
   return value;
 }
 
@@ -576,6 +626,16 @@ const MAX_ARRAY_ENTRIES = 500;
  * silently mutated the prototype of the object handed back to the console.
  * `defineProperty` always creates an own data property, whatever the name.
  */
+/**
+ * The property name to EMIT. Classification always uses the original name;
+ * under strict, a name that is itself a URL has its query and fragment masked
+ * (`{ "https://h/p?sid=x": … }`). Two names differing only in query collapse
+ * to one; the later one wins, which is the accepted strict trade.
+ */
+function emittedKey(property: string, options?: RedactionOptions): string {
+  return isStrict(options) ? redactUrlsStrictly(property) : property;
+}
+
 function defineEntry(record: Record<string, unknown>, property: string, value: unknown): void {
   Object.defineProperty(record, property, {
     value,
@@ -589,13 +649,18 @@ function defineEntry(record: Record<string, unknown>, property: string, value: u
  * Flatten an Error into a plain record, preserving the fields that make an
  * error diagnostic while routing every value through the redacting walker.
  */
-function errorToTree(error: Error, seen: WeakSet<object>, depth: number): Record<string, unknown> {
+function errorToTree(
+  error: Error,
+  seen: WeakSet<object>,
+  depth: number,
+  options?: RedactionOptions,
+): Record<string, unknown> {
   const source = error as Error & { cause?: unknown; errors?: unknown };
   const record: Record<string, unknown> = {
-    name: redactString(String(source.name ?? "Error")),
-    message: redactString(String(source.message ?? "")),
+    name: redactString(String(source.name ?? "Error"), options),
+    message: redactString(String(source.message ?? ""), options),
   };
-  if (source.stack) record.stack = redactString(String(source.stack));
+  if (source.stack) record.stack = redactString(String(source.stack), options);
 
   // `name`/`message`/`stack` are normally non-enumerable, but a subclass that
   // assigns `this.name` in its constructor makes them own enumerable keys.
@@ -609,15 +674,15 @@ function errorToTree(error: Error, seen: WeakSet<object>, depth: number): Record
   for (const property of keys.slice(0, MAX_OBJECT_ENTRIES)) {
     defineEntry(
       record,
-      property,
-      safeTree(property, (source as unknown as Record<string, unknown>)[property], seen, depth + 1),
+      emittedKey(property, options),
+      safeTree(property, (source as unknown as Record<string, unknown>)[property], seen, depth + 1, options),
     );
   }
   if (keys.length > MAX_OBJECT_ENTRIES) {
     record["[truncated]"] = `${keys.length - MAX_OBJECT_ENTRIES} more entries`;
   }
-  if (source.cause !== undefined) record.cause = safeTree("cause", source.cause, seen, depth + 1);
-  if (source.errors !== undefined) record.errors = safeTree("errors", source.errors, seen, depth + 1);
+  if (source.cause !== undefined) record.cause = safeTree("cause", source.cause, seen, depth + 1, options);
+  if (source.errors !== undefined) record.errors = safeTree("errors", source.errors, seen, depth + 1, options);
   return record;
 }
 
@@ -644,7 +709,13 @@ function errorToTree(error: Error, seen: WeakSet<object>, depth: number): Record
  * Getters ARE still invoked, matching v1 behavior; a throwing getter propagates
  * and is converted to a withheld marker by the caller.
  */
-function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: number): unknown {
+function safeTree(
+  key: string,
+  value: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+  options?: RedactionOptions,
+): unknown {
   if (value === null || value === undefined) return value;
 
   // The credential-key guard runs FIRST, before any type dispatch. Placing it
@@ -660,15 +731,15 @@ function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: num
     return TWO_FACTOR_KEYS.has(normalizeKey(key)) ? 0 : `${value as bigint}n`;
   }
   if (type === "string" || type === "number" || type === "boolean") {
-    return redactByKey(key, value);
+    return redactByKey(key, value, options);
   }
   if (type === "function") {
     // The name is attacker-controllable, so redact it like any other text.
     const name = (value as { name?: string }).name;
-    return name ? `[Function: ${redactString(String(name))}]` : "[Function]";
+    return name ? `[Function: ${redactString(String(name), options)}]` : "[Function]";
   }
-  if (type === "symbol") return redactString(String(value as symbol));
-  if (type !== "object") return redactString(String(value));
+  if (type === "symbol") return redactString(String(value as symbol), options);
+  if (type !== "object") return redactString(String(value), options);
 
   const object = value as object;
   if (seen.has(object)) return "[Circular]";
@@ -676,7 +747,7 @@ function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: num
 
   seen.add(object);
   try {
-    if (object instanceof Error) return errorToTree(object, seen, depth);
+    if (object instanceof Error) return errorToTree(object, seen, depth, options);
 
     // Built-ins are read through their INTRINSIC prototype methods rather than
     // the instance's own. A subclass overriding `toISOString`, an object with
@@ -688,10 +759,26 @@ function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: num
       const time = Date.prototype.getTime.call(object);
       return Number.isNaN(time) ? "[Invalid Date]" : Date.prototype.toISOString.call(object);
     }
-    if (object instanceof RegExp) return redactString(RegExp.prototype.toString.call(object));
+    if (object instanceof RegExp) {
+      let text = RegExp.prototype.toString.call(object);
+      if (isStrict(options)) {
+        // toString escapes every `/` in the source, which hides a URL from the
+        // extractor. Work on the source between the delimiters: unescape, run
+        // the strict URL pass, re-escape. Lossless, because every `/` in the
+        // source was escaped and the marker contains none.
+        // A `/` inside a character class is NOT escaped by toString, so the
+        // round trip is only lossless when the pass changed something; keep
+        // the original representation otherwise.
+        const end = text.lastIndexOf("/");
+        const body = text.slice(1, end).replace(/\\\//g, "/");
+        const masked = redactUrlsStrictly(body);
+        if (masked !== body) text = `/${masked.replace(/\//g, "\\/")}${text.slice(end)}`;
+      }
+      return redactString(text, options);
+    }
     if (typeof URL !== "undefined" && object instanceof URL) {
       const href = Object.getOwnPropertyDescriptor(URL.prototype, "href")?.get?.call(object);
-      return redactString(String(href ?? "[URL]"));
+      return redactString(String(href ?? "[URL]"), options);
     }
     // Map and Set serialize to `{}` under JSON.stringify, which is what v1
     // emitted. Keep that rather than newly exposing their contents.
@@ -701,7 +788,7 @@ function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: num
       const limit = Math.min(object.length, MAX_ARRAY_ENTRIES);
       const items: unknown[] = [];
       for (let index = 0; index < limit; index++) {
-        items.push(safeTree(String(index), object[index], seen, depth + 1));
+        items.push(safeTree(String(index), object[index], seen, depth + 1, options));
       }
       if (object.length > limit) items.push(`[Truncated: ${object.length - limit} more entries]`);
       return items;
@@ -712,7 +799,11 @@ function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: num
     const limit = Math.min(keys.length, MAX_OBJECT_ENTRIES);
     for (let index = 0; index < limit; index++) {
       const property = keys[index];
-      defineEntry(record, property, safeTree(property, (object as Record<string, unknown>)[property], seen, depth + 1));
+      defineEntry(
+        record,
+        emittedKey(property, options),
+        safeTree(property, (object as Record<string, unknown>)[property], seen, depth + 1, options),
+      );
     }
     if (keys.length > limit) record["[truncated]"] = `${keys.length - limit} more entries`;
     return record;
@@ -723,17 +814,20 @@ function safeTree(key: string, value: unknown, seen: WeakSet<object>, depth: num
   }
 }
 
-function redactedClone(key: string, value: object): unknown {
+/**
+ * Fixed text. It used to interpolate `Object.prototype.toString(value)`, but
+ * that is a `Symbol.toStringTag` getter — caller-controlled text on the one
+ * path that exists because the value could not be trusted — and redacting it
+ * still leaked through the URL extractor's known boundaries. So nothing from
+ * the value is emitted.
+ */
+export const WITHHELD = "[unserializable value — withheld to avoid logging unredacted data]";
+
+function redactedClone(key: string, value: object, options?: RedactionOptions): unknown {
   try {
-    return safeTree(key, value, new WeakSet<object>(), 0);
+    return safeTree(key, value, new WeakSet<object>(), 0, options);
   } catch {
-    let type = "value";
-    try {
-      type = Object.prototype.toString.call(value);
-    } catch {
-      // Even type inspection can invoke a hostile Symbol.toStringTag getter.
-    }
-    return `[unserializable ${type} — withheld to avoid logging unredacted data]`;
+    return WITHHELD;
   }
 }
 
@@ -743,17 +837,17 @@ function redactedClone(key: string, value: object): unknown {
  * @param value The value to potentially redact
  * @returns Redacted value if key indicates sensitive data
  */
-export function redactValueByKey(key: string, value: unknown): unknown {
+export function redactValueByKey(key: string, value: unknown, options?: RedactionOptions): unknown {
   if (value == null) return value;
 
   // For objects, walk a redacted plain-data copy.
   if (typeof value === "object") {
     if (isCredentialKey(key)) return "***";
-    return redactedClone(key, value);
+    return redactedClone(key, value, options);
   }
 
   // For primitives, use the key-based redaction directly
-  return redactByKey(key, value);
+  return redactByKey(key, value, options);
 }
 
 /**
@@ -761,15 +855,21 @@ export function redactValueByKey(key: string, value: unknown): unknown {
  * @param args Array of arguments that may contain sensitive data
  * @returns Sanitized array safe for logging
  */
-export function sanitizeArgs(args: unknown[]): unknown[] {
+export function sanitizeArgs(args: unknown[], options?: RedactionOptions): unknown[] {
   return args.map((arg) => {
-    if (typeof arg === "string") return redactString(arg);
+    if (typeof arg === "string") return redactString(arg, options);
     if (typeof arg === "object" && arg !== null) {
       // Never return the original object on failure: callers trust this
       // function precisely because it must not fail open.
-      return redactedClone("", arg);
+      return redactedClone("", arg, options);
     }
     if (typeof arg === "bigint") return `${arg}n`;
+    // A function's name and a symbol's description are caller text that the
+    // console would print verbatim; render them the way the walker does.
+    // A function's `name` is a getter the caller controls, so it goes through
+    // the guarded clone and is withheld if it throws.
+    if (typeof arg === "function") return redactedClone("", arg, options);
+    if (typeof arg === "symbol") return redactString(String(arg), options);
     return arg;
   });
 }

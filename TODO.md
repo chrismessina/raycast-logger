@@ -67,9 +67,11 @@ from `main` at `9bf1488`. 1.5 merges to `main` first; 2.0 rebases onto it and de
    call of every logger; there is no per-child opt-out. If `getPreferenceValues` throws,
    the level **falls back to the configured value** — which can be `false`, so this is
    *not* fail-closed and must be stated as such in the README. Read the preference the
-   same way `verboseLogging` is read, and note that path's own error logging
-   (`sanitizeArgs([error])` at `src/logger.ts:119` and `:133`) must use the configured
-   level, since the preference is what just failed.
+   same way `verboseLogging` is read. The two verbosity-failure diagnostics differ on
+   purpose: when the *preference read* fails (`defaultVerboseCheck`) the diagnostic uses
+   the configured level, because the preference is what just failed; when the *author's
+   custom callback* fails (`isVerboseEnabled`) the preference is still readable, so the
+   effective level applies. Codex round 1 caught the second case.
 5. **Thread it, never store it — the full chain.** `redactString(input, options?)` and
    `sanitizeArgs(args, options?)` gain `{ level: "standard" | "strict" }` (2.0 extends the
    same object with `additionalSensitiveKeys`). **No module-level mode flag** — two
@@ -83,9 +85,15 @@ from `main` at `9bf1488`. 1.5 merges to `main` first; 2.0 rebases onto it and de
    - `errorToTree` calls `redactString` directly for `name`, `message`, `stack`
      (`src/redaction.ts:595-598`) and recurses for `cause`/`errors`.
    - the `RegExp` and `URL` built-in branches (`src/redaction.ts:691-694`).
-   - Logger sites: `safeText` (`src/logger.ts:191` — prefix, `step` id, `inspect`
-     label), `processLogData` (`:243`), `inspect` (`:432` and the `:439` fallback), and
-     the two preference-error paths above.
+   - Logger sites: `safeText` (prefix, `step` id, `inspect` label), `processLogData`,
+     `inspect` (including its fallback, which IS reachable: a function whose `name`
+     getter throws makes sanitization itself throw), and the two verbosity-failure
+     diagnostics above. Line numbers deliberately omitted — grep the function names.
+   - Found by Codex rounds 1–2, all now fixed and pinned in `test/strict.test.mjs`:
+     top-level functions/symbols returned raw by `sanitizeArgs`; `RegExp` sources hide
+     URLs behind `\/`; the withheld marker interpolated a hostile `Symbol.toStringTag`
+     (now fixed text, `WITHHELD`); property *names* that are URLs; a throwing function
+     `name` getter escaping as an exception.
 
 `safe()` composition is moot until `safe()` exists. Record only: strict must not
 preclude a per-value override later.
