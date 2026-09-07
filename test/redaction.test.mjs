@@ -75,7 +75,9 @@ test("redactString: a short hex string is not a token", () => {
 });
 
 test("redactString: masks long base64-like runs", () => {
-  assert.doesNotMatch(redactString("blob QUJDREVGR0hJSktMTU5PUFFSU1Q="), /QUJDREVGR0hJSktMTU5PUFFSU1Q/);
+  // Exact output, not doesNotMatch(/whole secret/): a partial mask that
+  // leaves a visible tail would satisfy the absence check.
+  assert.equal(redactString("blob QUJDREVGR0hJSktMTU5PUFFSU1Q="), "blob ***");
 });
 
 test("redactString: an ordinary short word is not base64", () => {
@@ -968,9 +970,9 @@ test("regression: narrowing the base64 pass still masks slashless base64", () =>
   // Mixed-case with digits, no slash, no padding — the commonest real shape.
   const bareToken = "aGVsbG8Xd29ybGQ5c2VjcmV0dmFsdWUxMjM0";
   for (const secret of [padded, unpadded, bareToken]) {
-    assert.doesNotMatch(redactString(`blob ${secret}`), new RegExp(secret), `unmasked: ${secret}`);
+    assert.equal(redactString(`blob ${secret}`), "blob ***", `unmasked: ${secret}`);
   }
-  assert.doesNotMatch(redactString("hash 0123456789abcdef0123456789abcdef"), /0123456789abcdef/);
+  assert.equal(redactString("hash 0123456789abcdef0123456789abcdef"), "hash ***");
 });
 
 test("regression: slash-bearing base64 secrets are still masked", () => {
@@ -980,13 +982,41 @@ test("regression: slash-bearing base64 secrets are still masked", () => {
   const cases = [
     // `Authorization:` is matched by the label rule, but its value stops at the
     // first whitespace (`Basic`), so the credential itself relied on this pass.
-    ["Authorization: Basic YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4/+7dzLuq", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"],
+    ["Authorization: Basic YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4/+7dzLuq", "Authorization: *** ***"],
     // AWS's own documented secret-access-key example.
-    ["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI"],
+    ["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "***"],
     // A PEM body line logged on its own.
-    ["YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4/+7dzLuq", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"],
+    ["YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4/+7dzLuq", "***"],
   ];
-  for (const [input, secret] of cases) {
-    assert.doesNotMatch(redactString(input), new RegExp(secret), `secret survived: ${input}`);
+  for (const [input, expected] of cases) {
+    assert.equal(redactString(input), expected, `secret survived: ${input}`);
   }
+});
+
+test("preservation corpus: benign diagnostics pass through byte-identical", () => {
+  // The counterweight to every absence assertion above. A mutation that
+  // withholds or masks everything satisfies `doesNotMatch(/secret/)` in all
+  // of them while destroying the product; this one test fails on it. Keep
+  // adding rows here whenever an over-redaction is fixed.
+  const messages = [
+    "GET /api/v1/lists/abc123def456ghi/bookmarks?limit=10 completed in 29.54ms",
+    "image getmeili/meilisearch:v1.41.0",
+    "configFiles /Users/me/Developer/Docker/proj-app/docker-compose.yml",
+    "fetch failed: ECONNREFUSED 127.0.0.1:8080",
+    "commit deadbeef by release bot",
+    "GET https://api.github.com/repos/o/r?per_page=100&page=2 -> 403",
+  ];
+  for (const message of messages) {
+    assert.equal(redactString(message), message);
+  }
+
+  const value = {
+    cacheKey: "user:42",
+    statusCode: 404,
+    error: { code: "ECONNREFUSED", errno: -61 },
+    url: "https://api.test/v1/items/abc123?page=2",
+    tags: ["a", "b"],
+    nested: { sortKey: "name", publicKey: "pk_live_visible" },
+  };
+  assert.deepEqual(sanitizeArgs([value])[0], value);
 });
