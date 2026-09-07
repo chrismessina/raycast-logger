@@ -51,6 +51,10 @@ if you invoke `node --test` directly, build first or you are testing old code.
    `.github/workflows/publish.yml`, which publishes with npm provenance.
    Prereleases go to the `next` dist-tag automatically.
 
+Publish authenticates with `secrets.NPM_TOKEN`. `id-token: write` only mints the
+provenance attestation and is **not** a publish credential — dropping the token
+while keeping `--provenance` fails with `ENEEDAUTH`.
+
 Commits are SSH-signed via the 1Password agent. If signing fails, leave the work
 staged and say so rather than bypassing it.
 
@@ -143,15 +147,17 @@ compatibility commitment to published extensions.
   found the same shape repeatedly: a limit (prefix count, decode rounds,
   recursion depth, label length) that an attacker steps over by adding one more
   of something. Bounds are right for *resource exhaustion* and wrong for
-  *classification*. Prefer removing the mechanism — the message matcher uses an
-  atomic group rather than a length cap for exactly this reason.
+  *classification*. Prefer removing the mechanism where you can — the message matcher uses an atomic group so
+  the engine cannot backtrack. It still carries a `{0,511}` cap for a separate reason (an
+  uncapped atomic lookahead costs O(n) at every start position), and that cap is a
+  documented false-negative boundary above 512 characters.
 - **Module-scope regexes must only be used with `String.replace()`,** which
   resets `lastIndex`. Calling `.test()` / `.exec()` / `.matchAll()` on a
   `g`-flagged shared regex makes redaction nondeterministic.
 
 ## Testing expectations
 
-`test/redaction.test.mjs` and `test/logger.test.mjs` (110 cases) import the
+`test/redaction.test.mjs` and `test/logger.test.mjs` (114 cases) import the
 compiled leaf modules. `redaction.test.mjs` imports `dist/redaction.js`
 directly rather than the barrel, because `index.js` pulls in `logger.js`, which
 requires `@raycast/api` — a package with no loadable runtime outside Raycast.

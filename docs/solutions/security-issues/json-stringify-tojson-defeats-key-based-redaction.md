@@ -147,44 +147,44 @@ direct commits; this repo has no PRs for the work (`gh pr list --state all`
 returns only Dependabot #1 and #2).
 
 **`JSON.stringify` was removed from the traversal path entirely.** It is replaced
-by `safeTree()`, a direct recursive walker at `src/redaction.ts:610` (rationale
-in the doc comment at `src/redaction.ts:587-609`). The walker never invokes
+by `safeTree()`, a direct recursive walker at `src/redaction.ts:647` (rationale
+in the doc comment at `src/redaction.ts:624-646`). The walker never invokes
 `toJSON`. Relevant properties of the new implementation:
 
 - **The credential-key guard runs FIRST, before any type dispatch**
-  (`src/redaction.ts:619`). Placing it after the primitive branches meant
+  (`src/redaction.ts:656`). Placing it after the primitive branches meant
   `{ token: 123n }`, `{ token: Symbol("s") }`, and `{ token: namedFn }` each
   converted themselves to text and returned before the guard was reached.
 - **Built-ins whose `toJSON`/`toString` carried real meaning are special-cased
   and read through INTRINSIC prototype methods**, so a subclass or own-property
   override cannot substitute an arbitrary string:
   - `Date` — `Date.prototype.getTime.call(object)` then
-    `Date.prototype.toISOString.call(object)` (`src/redaction.ts:650-653`).
+    `Date.prototype.toISOString.call(object)` (`src/redaction.ts:687-690`).
   - `RegExp` — `RegExp.prototype.toString.call(object)`, result still passed
-    through `redactString` (`src/redaction.ts:654`).
+    through `redactString` (`src/redaction.ts:691`).
   - `URL` — the `href` getter pulled off the prototype descriptor:
     `Object.getOwnPropertyDescriptor(URL.prototype, "href")?.get?.call(object)`
-    (`src/redaction.ts:655-658`).
-- **`Map` and `Set` render `{}`** (`src/redaction.ts:661`), matching what
+    (`src/redaction.ts:692-695`).
+- **`Map` and `Set` render `{}`** (`src/redaction.ts:698`), matching what
   `JSON.stringify` emitted in v1 — deliberately not newly exposing their contents.
-- **`Error` is flattened by `errorToTree`** (`src/redaction.ts:642` dispatch,
-  function at `src/redaction.ts:555`). Because no `toJSON` runs first, the
+- **`Error` is flattened by `errorToTree`** (`src/redaction.ts:679` dispatch,
+  function at `src/redaction.ts:592`). Because no `toJSON` runs first, the
   `instanceof Error` branch is now actually reachable.
 - **Traversal is bounded**: `MAX_DEPTH = 12`, `MAX_OBJECT_ENTRIES = 200`,
-  `MAX_ARRAY_ENTRIES = 500` (`src/redaction.ts:529-531`), with over-limit
+  `MAX_ARRAY_ENTRIES = 500` (`src/redaction.ts:566-568`), with over-limit
   containers emitting truncation markers rather than silently dropping data.
 - **Cycles render `[Circular]` with siblings preserved.** The `seen` set is
   PATH-scoped, not global — `seen.delete(object)` runs in a `finally`
-  (`src/redaction.ts:682-686`), so the same object appearing twice in a tree is
+  (`src/redaction.ts:719-723`), so the same object appearing twice in a tree is
   rendered twice instead of being falsely reported as a cycle.
 - **Properties are attached with `Object.defineProperty`, never plain
-  assignment** (`defineEntry`, `src/redaction.ts:542`). Plain
+  assignment** (`defineEntry`, `src/redaction.ts:579`). Plain
   `record["__proto__"] = value` invokes the inherited setter and reparents the
   result object.
-- **It now fails CLOSED.** `redactedClone` (`src/redaction.ts:689`) catches
+- **It now fails CLOSED.** `redactedClone` (`src/redaction.ts:726`) catches
   anything the walk throws and returns
   `` `[unserializable ${type} — withheld to avoid logging unredacted data]` ``
-  (`src/redaction.ts:699`), with the type inspection itself wrapped because a
+  (`src/redaction.ts:736`), with the type inspection itself wrapped because a
   hostile `Symbol.toStringTag` getter can throw too.
 
 ### Behavior change this forces
@@ -194,7 +194,7 @@ enumerable properties instead. That is intended and unavoidable: honoring
 `toJSON` is exactly the bypass.
 
 **Getters ARE still invoked** — `safeTree` reads properties normally at
-`src/redaction.ts:678`, matching v1 behavior. A throwing getter propagates and is
+`src/redaction.ts:715`, matching v1 behavior. A throwing getter propagates and is
 converted to the withheld marker by `redactedClone`. This is a redaction
 boundary, not a side-effect-free snapshotter; do not describe it as one.
 
@@ -210,7 +210,7 @@ value being inspected gets to choose what the inspector sees. No amount of
 key-list tuning fixes an inspector standing downstream of its subject.
 
 Walking the value ourselves puts the inspector upstream. Own enumerable keys are
-read directly (`Object.keys`, `src/redaction.ts:674`), and the policy function
+read directly (`Object.keys`, `src/redaction.ts:711`), and the policy function
 decides on the real key. There is no hook between the object and the redactor.
 
 The intrinsic-prototype reads close the same class of hole one level down. A
@@ -243,7 +243,7 @@ the answer.
 
 **3. Attach walked properties with `Object.defineProperty`, not assignment** —
 otherwise a `__proto__` key in the payload reparents your output object
-(`src/redaction.ts:542`).
+(`src/redaction.ts:579`).
 
 **4. Assert the POSITIVE, not only the absence of the secret.** This is the
 testing rule that generalizes furthest. A test shaped like:
@@ -295,12 +295,12 @@ any sanitizer and confirm no branch returns caller data. The v1.2.4 regression
 was a single `return arg;`.
 
 **Residual hazard.** `redactByKey` is still exported and its doc comment at
-`src/redaction.ts:478-479` still reads *"safe to use as JSON.stringify replacer /
+`src/redaction.ts:515-516` still reads *"safe to use as JSON.stringify replacer /
 Does NOT recurse into objects; lets JSON.stringify handle traversal"*, with
-`src/redaction.ts:525` adding *"Return objects/arrays as-is; JSON.stringify will
+`src/redaction.ts:562` adding *"Return objects/arrays as-is; JSON.stringify will
 recurse into them."* Inside v1.3.0 its actual usage is sound — a per-value
-primitive policy called from `safeTree` (`src/redaction.ts:626`) and
-`redactValueByKey` (`src/redaction.ts:719`). But that docstring invites a
+primitive policy called from `safeTree` (`src/redaction.ts:663`) and
+`redactValueByKey` (`src/redaction.ts:756`). But that docstring invites a
 consumer, or a future maintainer, to reinstate exactly the pattern this incident
 removed. Treat it as a docstring to correct, not as supported usage.
 
