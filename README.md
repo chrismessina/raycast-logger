@@ -118,11 +118,10 @@ logger.log("GET https://api.example.com/v1/items/abc123?page=2&sid=SECRET");
 ```
 
 It is **off by default**, because a query string is often the thing being diagnosed.
-A debug log that omits the input is not a safer log; it is a useless one. The right
-moment to raise the floor is when a log is about to leave the machine — pasted into
-an issue, sent to a maintainer — and the person who knows that is the user, not the
-extension author. So it is exposed as a **user preference**. Add it to your
-`package.json` next to `verboseLogging`:
+A debug log that omits the input is not a safer log; it is a useless one. The person
+who knows a log is going to leave the machine — pasted into an issue, sent to a
+maintainer — is the user, not the extension author. So it is exposed as a **user
+preference**. Add it to your `package.json` next to `verboseLogging`:
 
 ```json
 {
@@ -131,7 +130,7 @@ extension author. So it is exposed as a **user preference**. Add it to your
   "required": false,
   "title": "Strict Redaction",
   "label": "Also hide URL query strings and fragments in logs",
-  "description": "Turn on before sharing a log. Masks every URL query string and fragment, including values that automatic redaction cannot recognize by name.",
+  "description": "Enable before reproducing an issue, then share only the lines written afterwards. Masks every URL query string and fragment, including values that automatic redaction cannot recognize by name. Does not change lines already in the console.",
   "default": false
 }
 ```
@@ -141,6 +140,12 @@ An extension can also set the level in code:
 ```typescript
 new Logger({ enableRedaction: "strict" });   // true and "standard" are the same level
 ```
+
+**The preference is read per call**, so it affects only lines written after it is
+turned on. It cannot clean up console output that already exists. The instruction to
+users is therefore *enable, then reproduce, then share only the new lines* — not
+"turn it on before pasting" — and the description in the block above says so, because
+every extension that pastes it ships that sentence.
 
 **Precedence:** the user preference wins. When `strictRedaction` is on, the effective
 level is strict even if the extension configured `enableRedaction: false` — the user's

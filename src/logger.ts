@@ -24,8 +24,9 @@ export interface LoggerPreferences {
   verboseLogging?: boolean;
   /**
    * User-controlled strict redaction (1.5.0). When true, every URL query string
-   * and fragment is masked in addition to the standard rules — a floor the
-   * user raises before sharing a log. Overrides the extension's configured
+   * and fragment is masked in addition to the standard rules. Read per call,
+   * so it affects only lines written after it is enabled — the user turns it
+   * on, reproduces, then shares the new lines. Overrides the extension's configured
    * `enableRedaction`, including `false`. Off by default; declare it as a
    * checkbox preference in the extension manifest to expose it.
    */
