@@ -130,7 +130,7 @@ preference**. Add it to your `package.json` next to `verboseLogging`:
   "required": false,
   "title": "Strict Redaction",
   "label": "Also hide URL query strings and fragments in logs",
-  "description": "Enable before reproducing an issue, then share only the lines written afterwards. Masks every URL query string and fragment, including values that automatic redaction cannot recognize by name. Does not change lines already in the console.",
+  "description": "Enable before reproducing an issue, then share only the lines written afterward. Masks every URL query string and fragment, including values that automatic redaction cannot recognize by name. Does not change lines already in the console.",
   "default": false
 }
 ```
